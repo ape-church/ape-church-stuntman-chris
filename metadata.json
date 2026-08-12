@@ -1,35 +1,40 @@
 {
-  "team": "example-partner",
-  "gameName": "example-game",
-  "displayTitle": "Example Game",
-  "description": "This is an example game. Enter a description here - three sentences max.",
+  "team": "ape-church",
+  "gameName": "stuntman-chris",
+  "displayTitle": "Stuntman Chris",
+  "description": "Charge the throttle, hit the electrified UFO ramp and launch Chris into the dusk sky for distance. Bounce off wrecks, grab moonboots and stay ahead of the graveyard skeletons and the UFO lasers for as long as you can. Every run ends one of four ways: lasered, boned, crashed, or wheels down.",
   "authors": [
     {
-      "name": "Example Partner",
-      "telegram": "example_telegram_username"
+      "name": "TODO",
+      "telegram": "TODO"
     }
   ],
   "revenueShare": [
     {
-      "name": "Your Name",
-      "telegram": "your_telegram_username",
+      "name": "TODO",
+      "telegram": "TODO",
       "address": "0x0000000000000000000000000000000000000000",
       "share": 100
     }
   ],
-  "status": "pending",
+  "status": "in-development",
   "category": "arcade",
   "tags": [
     "arcade",
-    "example",
-    "game"
+    "launcher",
+    "distance",
+    "pixel-art",
+    "stunt"
   ],
-  "thumbnail": "/my-game/card.png",
-  "banner": "/my-game/banner.png",
-  "mainComponent": "MyGame.tsx",
-  "windowComponent": "MyGameWindow.tsx",
-  "setupComponent": "MyGameSetupCard.tsx",
-  "configFile": "myGameConfig.ts",
+  "thumbnail": "/images/games/stuntman-chris/startscreen-1.webp",
+  "banner": "/images/games/stuntman-chris/startscreen-1.webp",
+  "mainComponent": "StuntmanChris.tsx",
+  "windowComponent": "StuntmanChrisWindow.tsx",
+  "setupComponent": "StuntmanChrisSetupCard.tsx",
   "version": "1.0.0",
-  "submittedAt": "2025-01-15"
+  "submittedAt": "2026-08-12",
+  "todo": [
+    "TODO: card/banner art — thumbnail and banner both point at the title screen (startscreen-1.webp) because no 1:1 card or 2:1 banner art exists yet.",
+    "TODO: authors and revenueShare are placeholders — real names, telegram handles and payout addresses required before submission; shares must sum to 100."
+  ]
 }
