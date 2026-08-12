@@ -1,0 +1,453 @@
+/* Stuntman Chris — DOM chrome (HUD, title / result / preload overlays, the
+   hold-to-charge launch button).
+
+   Everything is scoped under the `.stuntman-chris` root class (hoo-hee-how
+   idiom) so these deliberately generic class names can't collide with Tailwind
+   globals or another game. Layout is done with Tailwind inline where it stays
+   readable; this file carries the palette tokens, the keyframes and the
+   pixel-display text treatments that Tailwind can't express cleanly.
+
+   Palette is lifted from the art drop (dusk pixel city): deep indigo night sky,
+   violet haze, the logo's blue/red stripe and the meebit's mint-cyan. No new
+   fonts — display text rides the globally-loaded Orbitron (--font-orbitron),
+   which is the repo's established arcade/game display face, with Nohemi
+   (--font-heading) as the fallback. */
+
+.stuntman-chris {
+  color-scheme: dark;
+
+  --sc-night: #150c2c;
+  --sc-deep: #0b0619;
+  --sc-purple: #2b1d5c;
+  --sc-violet: #4b2f8f;
+  --sc-haze: #7a4fd0;
+  --sc-cyan: #7ff0e4;
+  --sc-mint: #a9e8d5;
+  --sc-red: #d33a46;
+  --sc-blue: #3b5bda;
+  --sc-white: #f4f2ff;
+  --sc-dim: #b3a8d6;
+
+  --sc-display: var(--font-orbitron), var(--font-heading), system-ui, sans-serif;
+
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.stuntman-chris img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* ── shared display type ─────────────────────────────────────────────────── */
+
+.stuntman-chris .sc-display {
+  font-family: var(--sc-display);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stuntman-chris .sc-label {
+  font-family: var(--sc-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--sc-dim);
+}
+
+/* Chunky pixel-ish outline: a hard black rim + a cyan bloom, which is how the
+   source art treats its own lettering. */
+.stuntman-chris .sc-outline {
+  text-shadow:
+    -2px 0 0 #0b0619,
+    2px 0 0 #0b0619,
+    0 -2px 0 #0b0619,
+    0 2px 0 #0b0619,
+    0 4px 0 rgba(11, 6, 25, 0.85),
+    0 0 18px rgba(127, 240, 228, 0.45);
+}
+
+/* ── scene HUD ───────────────────────────────────────────────────────────── */
+
+.stuntman-chris .sc-hud {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: clamp(8px, 2.2%, 22px);
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.stuntman-chris .sc-hud-distance {
+  font-family: var(--sc-display);
+  font-weight: 900;
+  font-size: clamp(28px, 6.4vw, 68px);
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--sc-white);
+  font-variant-numeric: tabular-nums;
+}
+
+.stuntman-chris .sc-hud-best {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 2px;
+  border-radius: 999px;
+  background: rgba(11, 6, 25, 0.62);
+  border: 1px solid rgba(127, 240, 228, 0.32);
+  font-family: var(--sc-display);
+  font-weight: 700;
+  font-size: clamp(9px, 1.5vw, 13px);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sc-cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── full-window overlays (title / instructions / result / preload) ──────── */
+
+.stuntman-chris .sc-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+/* the dusk-sky wash used behind the letterboxed 1:1 title video and the
+   result screen — matches the top-of-frame sky in the art */
+.stuntman-chris .sc-duskwash {
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(122, 79, 208, 0.45) 0%, transparent 62%),
+    linear-gradient(180deg, #241547 0%, #150c2c 55%, #0b0619 100%);
+}
+
+.stuntman-chris .sc-scrim {
+  background: linear-gradient(
+    180deg,
+    rgba(11, 6, 25, 0.15) 0%,
+    rgba(11, 6, 25, 0.72) 55%,
+    rgba(11, 6, 25, 0.92) 100%
+  );
+}
+
+.stuntman-chris .sc-prompt {
+  font-family: var(--sc-display);
+  font-weight: 700;
+  font-size: clamp(11px, 2vw, 20px);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--sc-white);
+  animation: scPromptPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes scPromptPulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.stuntman-chris .sc-result-distance {
+  font-family: var(--sc-display);
+  font-weight: 900;
+  font-size: clamp(40px, 9vw, 96px);
+  line-height: 1;
+  color: var(--sc-white);
+  font-variant-numeric: tabular-nums;
+  animation: scPopIn 0.42s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+@keyframes scPopIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.stuntman-chris .sc-endcause {
+  font-family: var(--sc-display);
+  font-weight: 900;
+  font-size: clamp(14px, 3vw, 28px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.stuntman-chris .sc-endcause.sc-crash {
+  color: var(--sc-red);
+}
+.stuntman-chris .sc-endcause.sc-safe {
+  color: var(--sc-mint);
+}
+
+.stuntman-chris .sc-newbest {
+  font-family: var(--sc-display);
+  font-weight: 800;
+  font-size: clamp(10px, 1.7vw, 14px);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #ffd84a;
+  animation: scBlink 0.9s steps(2, end) infinite;
+}
+
+@keyframes scBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* pixel-chunky action button (result "Go Again", title "How to play") */
+.stuntman-chris .sc-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding: 10px 22px 9px;
+  border-radius: 4px;
+  border: 2px solid rgba(11, 6, 25, 0.9);
+  background: linear-gradient(180deg, var(--sc-violet) 0%, var(--sc-purple) 100%);
+  color: var(--sc-white);
+  font-family: var(--sc-display);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.28),
+    0 4px 0 #0b0619,
+    0 8px 18px rgba(0, 0, 0, 0.5);
+  transition: transform 0.08s ease, filter 0.12s ease;
+}
+.stuntman-chris .sc-btn:hover {
+  filter: brightness(1.12);
+}
+.stuntman-chris .sc-btn:active {
+  transform: translateY(3px);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.2),
+    0 1px 0 #0b0619;
+}
+.stuntman-chris .sc-btn.sc-btn-primary {
+  background: linear-gradient(180deg, #e2515c 0%, var(--sc-red) 100%);
+}
+.stuntman-chris .sc-btn.sc-btn-ghost {
+  background: rgba(11, 6, 25, 0.55);
+  border-color: rgba(127, 240, 228, 0.35);
+  box-shadow: none;
+  font-size: 11px;
+  padding: 7px 14px 6px;
+}
+.stuntman-chris .sc-btn.sc-btn-ghost:active {
+  transform: none;
+}
+.stuntman-chris .sc-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
+  transform: none;
+}
+
+/* ── hold-to-charge LAUNCH button (setup card) ───────────────────────────── */
+
+.stuntman-chris .sc-launch {
+  position: relative;
+  display: block;
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 0.08s ease, filter 0.15s ease;
+}
+.stuntman-chris .sc-launch img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 6px 0 rgba(11, 6, 25, 0.85));
+}
+.stuntman-chris .sc-launch:hover img {
+  filter: drop-shadow(0 6px 0 rgba(11, 6, 25, 0.85)) brightness(1.1);
+}
+.stuntman-chris .sc-launch.sc-holding {
+  transform: translateY(3px) scale(0.985);
+}
+.stuntman-chris .sc-launch.sc-holding img {
+  filter: drop-shadow(0 3px 0 rgba(11, 6, 25, 0.85)) brightness(1.22)
+    saturate(1.15);
+}
+.stuntman-chris .sc-launch:disabled {
+  cursor: default;
+  transform: none;
+}
+.stuntman-chris .sc-launch:disabled img {
+  filter: grayscale(0.65) brightness(0.6);
+}
+
+/* Fallback label — shown when the button art hasn't landed / failed to load. */
+.stuntman-chris .sc-launch-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 64px;
+  border-radius: 4px;
+  border: 2px solid rgba(11, 6, 25, 0.9);
+  background: linear-gradient(180deg, #e2515c 0%, var(--sc-red) 100%);
+  color: var(--sc-white);
+  font-family: var(--sc-display);
+  font-weight: 900;
+  font-size: 20px;
+  letter-spacing: 0.22em;
+}
+
+/* thin power read-out under the button — driven imperatively (no React state
+   per frame), so it's just a width the rAF ticker writes */
+.stuntman-chris .sc-power-track {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(11, 6, 25, 0.85);
+  border: 1px solid rgba(127, 240, 228, 0.28);
+}
+.stuntman-chris .sc-power-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--sc-cyan) 0%, #ffd84a 55%, var(--sc-red) 100%);
+  box-shadow: 0 0 12px rgba(127, 240, 228, 0.55);
+}
+
+/* ── setup-card stat rows ────────────────────────────────────────────────── */
+
+.stuntman-chris .sc-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(127, 240, 228, 0.12);
+}
+.stuntman-chris .sc-stat-row:last-child {
+  border-bottom: 0;
+}
+.stuntman-chris .sc-stat-value {
+  font-family: var(--sc-display);
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--sc-white);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── preload overlay ─────────────────────────────────────────────────────── */
+
+.stuntman-chris .sc-preload-track {
+  width: min(78%, 384px);
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(11, 6, 25, 0.9);
+  border: 1px solid rgba(127, 240, 228, 0.4);
+}
+.stuntman-chris .sc-preload-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--sc-blue) 0%,
+    var(--sc-cyan) 50%,
+    var(--sc-blue) 100%
+  );
+  box-shadow: 0 0 14px rgba(127, 240, 228, 0.6);
+  transition: width 0.15s ease-out;
+}
+
+/* horizontal "road" hairlines behind the preloader — a nod to the highway the
+   game opens on, no extra art needed */
+.stuntman-chris .sc-roadline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(127, 240, 228, 0.34),
+    transparent
+  );
+}
+
+/* ── instruction panel ───────────────────────────────────────────────────── */
+
+/* the instruction backdrop art is a 1:1 framed panel with a meebit standing at
+   its right edge — text is inset to the left so it never collides with him */
+.stuntman-chris .sc-instructions {
+  position: relative;
+  height: 100%;
+  aspect-ratio: 1 / 1;
+  max-width: 100%;
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(6px, 1.6%, 14px);
+  padding: 0 34% 0 26%;
+  text-align: left;
+}
+.stuntman-chris .sc-instructions .sc-inst-title {
+  font-family: var(--sc-display);
+  font-weight: 900;
+  font-size: clamp(13px, 2.4vw, 24px);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sc-cyan);
+  margin-bottom: 2px;
+}
+.stuntman-chris .sc-instructions li {
+  font-size: clamp(9px, 1.5vw, 14px);
+  line-height: 1.45;
+  color: var(--sc-white);
+}
+.stuntman-chris .sc-instructions li strong {
+  color: var(--sc-cyan);
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .stuntman-chris .sc-instructions {
+    aspect-ratio: auto;
+    width: 100%;
+    height: 100%;
+    background-size: cover;
+    padding: 0 18% 0 12%;
+  }
+}

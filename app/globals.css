@@ -94,9 +94,12 @@
 }
 
 @theme inline {
-  /* FONTS */
-  --font-roboto: var(--font-roboto);
-  --font-nohemia: var(--font-nohemia);
+  /* FONTS
+     Ported from ape-church globals.css (@theme inline) so `font-sans` and
+     `font-display` resolve to the same faces the game was designed against.
+     app/layout.tsx defines --font-body / --font-heading / --font-orbitron. */
+  --font-sans: var(--font-body);
+  --font-display: var(--font-heading);
 
   /* SIZES */
   --breakpoint-xs: 480px;
@@ -104,8 +107,6 @@
   /* COLORS */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -161,11 +162,42 @@
 }
 
 html {
-  background-image: url("/shared/background.svg");
-  background-size: cover;
-  background-repeat: no-repeat;
-  background-position: center center;
-  background-attachment: fixed;
+  /* The template's /shared/background.svg went with the example game; the flat
+     platform background colour is what the HUD frame sits on in ape-church. */
   background-color: var(--background);
   height: 100%;
+}
+
+/* ── Ported from ape-church globals.css for the Game HUD ──────────────────────
+   Everything below is copied out of ape-church's app/globals.css so the ported
+   HUD / card / game chrome renders identically here.
+
+   - --shadow-card + the .shadow-ds-card utility: components/ui/card.tsx (copied
+     verbatim from ape-church) applies `shadow-ds-card`, which does not exist in
+     the template's stylesheet.
+   - The --game-hud-stage-* trio already ships in the template above and matches
+     ape-church's values, so it is NOT duplicated here.
+   - stuntman-chris.css needs --font-orbitron / --font-heading, which are
+     defined by next/font in app/layout.tsx (same variable names as ape-church).
+   ------------------------------------------------------------------------- */
+
+:root {
+  --shadow-card: 0 10px 25px -10px rgba(0, 0, 0, 0.5),
+    0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-lifted: 0 24px 48px -16px rgba(0, 0, 0, 0.7),
+    0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+@layer utilities {
+  .shadow-ds-card {
+    box-shadow: var(--shadow-card);
+  }
+
+  .shadow-ds-lifted {
+    box-shadow: var(--shadow-lifted);
+  }
+
+  .tabular-amount {
+    font-variant-numeric: tabular-nums;
+  }
 }

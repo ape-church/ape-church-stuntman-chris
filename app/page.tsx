@@ -1,29 +1,10 @@
-import { Suspense } from "react";
-import { myGame } from "@/components/my-game/myGameConfig";
-import MyGameComponent from "@/components/my-game/MyGame";
-import GameHudPage from "@/components/shared/GameHudPage";
+import { redirect } from "next/navigation";
 
-export async function generateMetadata() {
-  return {
-    title: myGame.title,
-    description: myGame.description,
-  };
+/**
+ * This repo exists to build one game. The root just sends you to it — the real
+ * page is app/games/stuntman-chris/page.tsx, at the same route it occupies in
+ * ape-church so the whole folder copies back unchanged.
+ */
+export default function RootPage() {
+  redirect("/games/stuntman-chris");
 }
-
-const MyGamePage: React.FC = () => {
-  return (
-    <GameHudPage>
-      {/* No page-level <h1>: on the HUD layout the title lives in the HUD's own
-          title bar (see components/shared/GameHud.tsx). */}
-      {/* Suspense boundary is required: the game reads the ?id= replay param
-          with useSearchParams(), which opts the subtree into client-side
-          rendering. Without it the page cannot be prerendered and `npm run
-          build` fails with a missing-suspense-with-csr-bailout error. */}
-      <Suspense fallback={null}>
-        <MyGameComponent game={myGame} />
-      </Suspense>
-    </GameHudPage>
-  );
-};
-
-export default MyGamePage;
