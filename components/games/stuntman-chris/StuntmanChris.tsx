@@ -15,6 +15,8 @@ import StuntmanChrisWindow from "./StuntmanChrisWindow";
 import StuntmanChrisSetupCard from "./StuntmanChrisSetupCard";
 import StuntmanChrisPreloadOverlay from "./StuntmanChrisPreloadOverlay";
 import StuntmanChrisTitleOverlay from "./StuntmanChrisTitleOverlay";
+import { sfx } from "./lib/sound/sfx";
+import { createSoundDirector, type SoundDirector } from "./lib/sound/director";
 import "./stuntman-chris.css";
 
 interface StuntmanChrisProps {
@@ -86,10 +88,50 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
   const [lastEndCause, setLastEndCause] = useState<EndCause | null>(null);
   const [isNewBest, setIsNewBest] = useState(false);
   const bestRef = useRef(0);
+  const runsRef = useRef(0);
 
   // Imperative HUD nodes.
   const distanceRef = useRef<HTMLDivElement>(null);
   const powerFillRef = useRef<HTMLDivElement>(null);
+
+  // Sound: the director diffs engine state → sfx calls each frame; the mute /
+  // volume state mirrors the sfx module's persisted prefs for the sound menu.
+  const directorRef = useRef<SoundDirector | null>(null);
+  const [sfxMuted, setSfxMuted] = useState(false);
+  const [musicMuted, setMusicMuted] = useState(false);
+  const [sfxVolume, setSfxVolume] = useState(1);
+  const [musicVolume, setMusicVolume] = useState(0.7);
+  const [soundMenuOpen, setSoundMenuOpen] = useState(false);
+  const soundMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setSfxMuted(sfx.muted);
+    setMusicMuted(sfx.musicMutedPref);
+    setSfxVolume(sfx.sfxVolumePref);
+    setMusicVolume(sfx.musicVolumePref);
+  }, []);
+
+  // Close the sound menu on any pointer-down outside it. Taps inside the
+  // corner UI never reach the window (the container stops propagation).
+  useEffect(() => {
+    if (!soundMenuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!soundMenuRef.current?.contains(e.target as Node)) setSoundMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [soundMenuOpen]);
+
+  // Web Audio needs a user gesture before it may run — any first interaction
+  // (click, tap, spacebar) unlocks the context and starts loading the files.
+  useEffect(() => {
+    const unlock = () => sfx.unlock();
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 
   /** True while a charge is actually in flight — makes start/release idempotent
    *  no matter which of the three input paths fired (pointer, key, button). */
@@ -127,12 +169,15 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
               if (beat) {
                 bestRef.current = distance;
                 setBestDistance(distance);
+                if (runsRef.current > 0) sfx.play("new_best"); // not on run #1
               }
+              runsRef.current += 1;
             }
           },
         );
 
         engineRef.current = instance;
+        directorRef.current = createSoundDirector(instance);
         setEngine(instance);
         setPhase(instance.state.phase);
       } catch (error) {
@@ -163,6 +208,8 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
       const state = engineRef.current?.state;
       if (!state) return;
 
+      directorRef.current?.tick();
+
       const node = distanceRef.current;
       if (node) {
         const text = `${Math.max(0, Math.round(state.distanceM))} m`;
@@ -190,6 +237,7 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
     const instance = engineRef.current;
     if (!instance || !assetsReadyRef.current) return;
     if (instance.state.phase !== "title") return;
+    sfx.play("ui_click");
     instance.begin();
   }, []);
 
@@ -198,6 +246,7 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
     if (!instance) return;
     holdingRef.current = false;
     setIsNewBest(false);
+    sfx.play("ui_click");
     instance.reset();
   }, []);
 
@@ -278,6 +327,40 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
   const handleAssetsReady = useCallback(() => setAssetsReady(true), []);
   const handleAssetError = useCallback(() => setLoadFailed(true), []);
 
+  const toggleSfxMuted = useCallback(() => {
+    const next = !sfx.muted;
+    sfx.setMuted(next);
+    setSfxMuted(next);
+    if (!next) sfx.play("ui_click"); // audible confirmation on unmute
+  }, []);
+
+  const toggleMusicMuted = useCallback(() => {
+    const next = !sfx.musicMutedPref;
+    sfx.setMusicMuted(next);
+    setMusicMuted(next);
+    sfx.play("ui_click");
+  }, []);
+
+  // Dragging a slider while that channel is muted unmutes it — adjusting a
+  // volume you can't hear is never what anyone means.
+  const changeSfxVolume = useCallback((v: number) => {
+    sfx.setSfxVolume(v);
+    setSfxVolume(v);
+    if (sfx.muted) {
+      sfx.setMuted(false);
+      setSfxMuted(false);
+    }
+  }, []);
+
+  const changeMusicVolume = useCallback((v: number) => {
+    sfx.setMusicVolume(v);
+    setMusicVolume(v);
+    if (sfx.musicMutedPref) {
+      sfx.setMusicMuted(false);
+      setMusicMuted(false);
+    }
+  }, []);
+
   const showHud = HUD_PHASES.has(phase);
   const endCause = lastEndCause ?? "landed";
   const crashed = phase === "ended" && endCause !== "landed";
@@ -293,12 +376,10 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
             gameId={game.id}
           />
         }
-        // The scene is authored in a fixed 1920x1080 design space and the
-        // renderer letterboxes anything else, so the stage keeps 16:9 rather
-        // than taking GameHud's viewport-driven height (which would just add
-        // bars above and below). `lg:h-auto` releases that height so the
-        // aspect class governs — same move as Gimboz's 4:3 stage.
-        stageClassName="lg:h-auto lg:aspect-[16/9] lg:max-h-[860px]"
+        // No stage override: the renderer derives its design width from the
+        // container's aspect and fills whatever box it is given, so the stage
+        // takes GameHud's full viewport-driven height (clamp 560–900px) and a
+        // wider/taller stage simply sees more world — no letterbox bars.
         panel={
           <StuntmanChrisSetupCard
             game={game}
@@ -324,9 +405,11 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
         >
           {/* Scene + everything drawn over it. The pointer handlers live here
               rather than inside the window island so the island stays a pure
-              renderer mount; overlays sit above and swallow their own taps. */}
+              renderer mount; overlays sit above and swallow their own taps.
+              The inline-size container makes cqw units in the game CSS measure
+              the STAGE rather than the viewport (vw diverges badly in the HUD). */}
           <div
-            className="relative w-full lg:h-full"
+            className="relative w-full lg:h-full [container-type:inline-size]"
             style={{ touchAction: "manipulation" }}
             onPointerDown={(e) => {
               if (!engineRef.current) return;
@@ -341,8 +424,9 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
           >
             <StuntmanChrisWindow
               engine={engine}
-              // Mobile keeps the intrinsic 16:9 box; on lg the stage already
-              // is 16:9, so the scene just fills it.
+              // Mobile keeps the platform's square window; on lg the HUD stage
+              // provides the height and the renderer fills whatever aspect
+              // that yields.
               className="lg:h-full lg:aspect-auto"
               onAssetProgress={handleAssetProgress}
               onAssetsReady={handleAssetsReady}
@@ -398,6 +482,125 @@ const StuntmanChris: React.FC<StuntmanChrisProps> = ({ game }) => {
                 </button>
               </div>
             )}
+
+            {/* Sound menu — one button pinned bottom-right opens a small
+                panel with mute + volume for music and sfx. pointer-down is
+                stopped so a tap here can never start a charge (and so the
+                outside-click closer never sees inside taps). */}
+            <div
+              ref={soundMenuRef}
+              className="sc-sound-toggles"
+              onPointerDown={(e) => e.stopPropagation()}
+              onPointerUp={(e) => e.stopPropagation()}
+            >
+              {soundMenuOpen && (
+                <div className="sc-sound-menu" role="group" aria-label="Sound settings">
+                  <div className="sc-sound-row">
+                    <span className="sc-sound-row-label">Music</span>
+                    <button
+                      type="button"
+                      className="sc-sound-btn sc-sound-btn--sm"
+                      onClick={toggleMusicMuted}
+                      aria-pressed={musicMuted}
+                      aria-label={musicMuted ? "Unmute music" : "Mute music"}
+                      title={musicMuted ? "Music: off" : "Music: on"}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden>
+                        <path
+                          d="M9 18V6l10-2v11.5"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          fill="none"
+                          strokeLinecap="round"
+                        />
+                        <circle cx="7" cy="18" r="2.4" fill="currentColor" />
+                        <circle cx="17" cy="15.5" r="2.4" fill="currentColor" />
+                        {musicMuted && (
+                          <path d="M3.5 4l17 17" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+                        )}
+                      </svg>
+                    </button>
+                    <input
+                      type="range"
+                      className="sc-sound-slider"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={Math.round(musicVolume * 100)}
+                      onChange={(e) => changeMusicVolume(Number(e.target.value) / 100)}
+                      aria-label="Music volume"
+                    />
+                  </div>
+                  <div className="sc-sound-row">
+                    <span className="sc-sound-row-label">SFX</span>
+                    <button
+                      type="button"
+                      className="sc-sound-btn sc-sound-btn--sm"
+                      onClick={toggleSfxMuted}
+                      aria-pressed={sfxMuted}
+                      aria-label={sfxMuted ? "Unmute sound effects" : "Mute sound effects"}
+                      title={sfxMuted ? "Sound effects: off" : "Sound effects: on"}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden>
+                        <path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor" />
+                        {sfxMuted ? (
+                          <path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" strokeWidth="2" fill="none" />
+                        ) : (
+                          <path
+                            d="M16 8c1.5 1 2.2 2.4 2.2 4S17.5 15 16 16M18 5.5c2.4 1.6 3.6 3.8 3.6 6.5s-1.2 4.9-3.6 6.5"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            fill="none"
+                            strokeLinecap="round"
+                          />
+                        )}
+                      </svg>
+                    </button>
+                    <input
+                      type="range"
+                      className="sc-sound-slider"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={Math.round(sfxVolume * 100)}
+                      onChange={(e) => changeSfxVolume(Number(e.target.value) / 100)}
+                      onPointerUp={() => sfx.play("ui_click")} // hear the level
+                      aria-label="Sound effects volume"
+                    />
+                  </div>
+                </div>
+              )}
+              <button
+                type="button"
+                className="sc-sound-btn"
+                // The container stops pointer propagation (so taps here can't
+                // charge), which also keeps the window-level unlock listener
+                // from seeing this gesture — unlock explicitly, or a player
+                // whose first click is the sound menu gets no audio/music.
+                onClick={() => {
+                  sfx.unlock();
+                  setSoundMenuOpen((open) => !open);
+                }}
+                aria-expanded={soundMenuOpen}
+                aria-label={soundMenuOpen ? "Close sound settings" : "Open sound settings"}
+                title="Sound settings"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor" />
+                  {sfxMuted && musicMuted ? (
+                    <path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" strokeWidth="2" fill="none" />
+                  ) : (
+                    <path
+                      d="M16 8c1.5 1 2.2 2.4 2.2 4S17.5 15 16 16M18 5.5c2.4 1.6 3.6 3.8 3.6 6.5s-1.2 4.9-3.6 6.5"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      fill="none"
+                      strokeLinecap="round"
+                    />
+                  )}
+                </svg>
+              </button>
+            </div>
 
             <StuntmanChrisPreloadOverlay
               loaded={assetProgress.loaded}

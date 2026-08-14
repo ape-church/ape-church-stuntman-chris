@@ -43,3 +43,6 @@ next-env.d.ts
 # Stuntman Chris raw art drop (1.8GB source renders — runtime assets are generated
 # into public/images/games/stuntman-chris by scripts/build-stuntman-chris-assets.ts)
 public/images/games/meebel-knievel/
+
+# Late-arriving raw art drop — packed by scripts/pack-robot-obstacles.ts; raw frames must not ship (meebel-knievel precedent)
+public/images/games/stuntman-chris/sheets/Robot_Obstacles/

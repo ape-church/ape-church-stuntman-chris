@@ -196,6 +196,26 @@ export const SPRITES = {
     trimY: 0,
     scale: 0.548872,
   },
+  // HAND-ADDED (not from the main pipeline): packed from the late-arriving
+  // Robot_Obstacles drop by scripts/pack-robot-obstacles.ts — same crop/grid
+  // conventions. The 45-frame clip: idle head-scan (0–17), head tips back and
+  // the visor opens to FIRE skyward (18–26, eye flare peaks ~24–26), head
+  // recovers (27–44). Fold into the main pipeline on re-integration.
+  robotObstacle: {
+    url: "/images/games/stuntman-chris/sheets/robot-obstacle.webp",
+    frameCount: 45,
+    cols: 9,
+    rows: 5,
+    frameW: 177,
+    frameH: 314,
+    fps: 12,
+    loop: false,
+    srcCanvasW: 500,
+    srcCanvasH: 500,
+    trimX: 165,
+    trimY: 119,
+    scale: 1,
+  },
   moonboots: {
     url: "/images/games/stuntman-chris/sheets/moonboots.webp",
     frameCount: 4,

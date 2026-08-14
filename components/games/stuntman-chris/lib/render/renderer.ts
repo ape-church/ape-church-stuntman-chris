@@ -55,8 +55,20 @@ import {
  */
 const GROUND_Y = 962;
 
-/** Chris is pinned this far across the screen; `cameraX` is the world x here. */
-const CAM_ANCHOR_X = DESIGN_W * 0.3;
+/** Chris is pinned this fraction across the screen; `cameraX` is the world x here. */
+const CAM_ANCHOR_FRAC = 0.3;
+
+/**
+ * Clamps on the dynamic design width (see `applySize`). The scene always
+ * renders the full 1080 design rows and derives its design WIDTH from the
+ * container's aspect, so the canvas fills the box edge-to-edge instead of
+ * letterboxing the authored 16:9. The HUD stage ranges ~0.86:1–1.9:1
+ * (929–2052 design px) and mobile is 1:1 (1080); the clamps only exist so a
+ * degenerate container can't produce an absurd world view — inside them
+ * there are no pillar bars.
+ */
+const MIN_DESIGN_W = 720;
+const MAX_DESIGN_W = 2600;
 
 /** Camera pans up once Chris climbs above this screen y. */
 const CHRIS_TOP_Y = DESIGN_H * 0.28;
@@ -94,6 +106,11 @@ const LASER_FLASH_MS = 300;
 const LASER_MISS_COLOR = "#7fe9ff";
 const LASER_LETHAL_COLOR = "#ff5ad2";
 const LASER_CORE_W = 13;
+/** ms after a laser's trigger at which the beam erupts — the robot clip's
+ *  wind-up (eye flare peaks at frame ~24 of the 12fps clip). Kept equal to
+ *  the engine's trigger lead so the beam fires right as Chris arrives at the
+ *  event's atX. */
+const LASER_FIRE_DELAY_MS = TUNING.events.laserLeadMs;
 
 /** Fallback altitude for a moonboots pickup if the engine didn't set `obj.y`
  *  (it always should — the pickup sits on Chris's realized arc). */
@@ -131,6 +148,20 @@ const CHRIS_SHEETS: Record<ChrisAnimKey, SpriteKey> = {
 };
 
 const RAMP_ANCHOR: SpriteAnchor = { ax: 0.45, ay: 0.86, scale: 0.9 };
+/**
+ * Laser robot (Robot_Obstacles drop): 500×500 source canvas, content bbox
+ * (165,119)-(342,433) -> feet at y≈0.866, figure centre x≈0.507. Scale 1.0
+ * renders the ~314px figure at the bounce-meebit height (MEEBIT_H), so the
+ * robot reads as a near-lane character, not a background extra.
+ */
+const ROBOT_ANCHOR: SpriteAnchor = { ax: 0.507, ay: 0.866, scale: 1.0 };
+/** The clip's first 18 frames are the idle head-scan; untriggered robots
+ *  loop them (the fire wind-up starts at frame 18). */
+const ROBOT_IDLE_FRAMES = 18;
+/** Beam muzzle — the opened visor during the fire frames — as fractions of
+ *  the robot's source canvas (same registration space as the anchor). */
+const ROBOT_EYE_AX = 0.52;
+const ROBOT_EYE_AY = 0.33;
 const SKELETON_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 0.875, scale: 1.0 };
 const BOUNCE_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.45 };
 const BLOCKER_ANCHOR: SpriteAnchor = { ax: 0.45, ay: 0.86, scale: 0.72 };
@@ -139,15 +170,128 @@ const POWER_METER_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 0.5, scale: 1.0 };
 const POWER_METER_Y = 985;
 
 /**
- * PLACEHOLDER ART. The manifest ships no bounce/blocker sheets, so:
- *   bounce  -> `viz` (the animated green Meebit bystander from the styleframe;
- *              the plan lists "meebit bystanders" as a bounce object, so this
- *              is the intended subject even though it isn't a bespoke sheet)
- *   blocker -> `rampUfo` frame 0 (a second crashed UFO reads as a lethal wall)
- * Swap these two constants when real art lands.
+ * PLACEHOLDER ART. The manifest ships no bespoke bounce/blocker sheets, so:
+ *   bounce v1 -> `viz` (the animated dancing Meebit from the styleframe)
+ *   bounce v2 -> one of the static meebit extras, picked per object id
+ *   blocker   -> `rampUfo` frame 0 (a second crashed UFO reads as a lethal wall)
  */
 const BOUNCE_SHEET: SpriteKey = "viz";
 const BLOCKER_SHEET: SpriteKey = "rampUfo";
+
+/** The Meebit bystander sheets (extras/). Each file is an 8×8 grid of 80×80
+ *  cells — rows 0–3 are 8-frame walk cycles (right / back / left / front),
+ *  rows 4–7 the matching idles. Used as bounce-object variant 2 and as the
+ *  roadside crowd — exactly the "meebit bystanders" the plan doc lists. */
+const MEEBIT_KEYS: readonly ImageKey[] = [
+  "meebit01896",
+  "meebit02239",
+  "meebit03126",
+  "meebit03407",
+  "meebit05987",
+  "meebit06432",
+  "meebit07823",
+  "meebit08369",
+  "meebit17600",
+  "meebit18868",
+  "meebit19557",
+];
+
+/** Deterministic per-seed pick so an object keeps its character every frame. */
+const meebitKeyFor = (seed: number): ImageKey =>
+  MEEBIT_KEYS[((seed * 7919) >>> 0) % MEEBIT_KEYS.length];
+
+/** Cheap integer hash for deterministic world decoration (no Math.random —
+ *  the renderer must stay replay-stable). */
+const hash32 = (n: number): number => {
+  let h = (n | 0) ^ 0x9e3779b9;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return (h ^ (h >>> 16)) >>> 0;
+};
+
+/** Meebit sheet geometry (see MEEBIT_KEYS above). */
+const MEEBIT_GRID = 8;
+/**
+ * Row map, identical across all 11 sheets (each was inspected): rows 0–3 are
+ * 8-frame walks (right / back / left / front), rows 4–7 the matching idles.
+ * Right/left assignment player-verified: row 0 walks screen-right.
+ */
+const MEEBIT_WALK_RIGHT_ROW = 0;
+const MEEBIT_WALK_LEFT_ROW = 2;
+/** Front-facing idle row — spectators and bounce targets face the road. */
+const MEEBIT_IDLE_ROW = 7;
+const MEEBIT_FPS = 6;
+/** Walk-cycle rate — raised with the patrol speed so the stride length stays
+ *  plausible instead of the feet skating over the road. */
+const MEEBIT_WALK_FPS = 12;
+
+/**
+ * BOUNCE meebits render at the viz dancer's height (653px art × 0.45 ≈ 294px
+ * figure): the meebit figure fills ~75/80 of its cell, so a 314px cell puts
+ * its head at the ~270px line the engine's 45m bounce deck expects Chris to
+ * hit — mismatched bounce characters made head-bounces look like Chris was
+ * bouncing off thin air. Background characters stay deliberately smaller.
+ */
+const MEEBIT_H = 314;
+
+/** Roadside crowd: one candidate slot every this many metres of world. */
+const BYSTANDER_SPACING_M = 210;
+/** Far-lane offset and size band for crowd meebits (smaller + higher = depth). */
+const BYSTANDER_LANE_RAISE = 36;
+const BYSTANDER_H_MIN = 175;
+const BYSTANDER_H_VAR = 60;
+
+/** Start-line spectators (world x in metres, all behind Chris's start mark). */
+const SPECTATOR_XS: readonly number[] = [-10, -23, -35];
+const SPECTATOR_VIZ_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.36 };
+
+/** Mutable scratch anchor for background viz dancers (scale set per draw). */
+const CROWD_VIZ_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.3 };
+
+// ── speed FX ────────────────────────────────────────────────────────────────
+// Perceived speed is mostly presentation: streaks fade in with vx, and a
+// moonboots surge layers ghosts + shake on top. All of it is derived from
+// EngineState + time functions — no random state, replay-stable.
+
+/** Streaks fade in from this vx (m/s) and saturate at the max. The floor sits
+ *  above cruise speed so ordinary flight stays clean — streaks are reserved
+ *  for genuinely fast moments (long-span arcs, bounour surges, boosts). */
+const STREAK_MIN_VX = 55;
+const STREAK_MAX_VX = 130;
+const STREAK_COUNT = 9;
+
+/**
+ * Streaks are drawn from this pre-feathered sprite (soft head/tail and soft
+ * vertical edges) rather than fillRect bars — hard-edged additive rectangles
+ * over pixel art read as scan-line glitches, a feathered blur reads as motion.
+ */
+function makeStreakSprite(r: number, g: number, b: number): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 8;
+  const x = c.getContext("2d");
+  if (!x) return c;
+  const along = x.createLinearGradient(0, 0, 256, 0);
+  along.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0)`);
+  along.addColorStop(0.22, `rgba(${r}, ${g}, ${b}, 0.9)`);
+  along.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+  x.fillStyle = along;
+  x.fillRect(0, 0, 256, 8);
+  const across = x.createLinearGradient(0, 0, 0, 8);
+  across.addColorStop(0, "rgba(0, 0, 0, 0)");
+  across.addColorStop(0.5, "rgba(0, 0, 0, 1)");
+  across.addColorStop(1, "rgba(0, 0, 0, 0)");
+  x.globalCompositeOperation = "destination-in";
+  x.fillStyle = across;
+  x.fillRect(0, 0, 256, 8);
+  return c;
+}
+
+/** How long the surge FX (ghosts, shake, hot streaks) play after a moonboots
+ *  pickup. Slightly longer than the engine's 900ms surge so the FX decay out
+ *  instead of cutting. The renderer reads the pickup's triggeredAtMs off the
+ *  object list — no engine contract change. */
+const BOOST_FX_MS = 1050;
 
 // ── Assets ──────────────────────────────────────────────────────────────────
 
@@ -171,11 +315,22 @@ function loadImageEl(url: string, timeoutMs: number): Promise<HTMLImageElement |
     };
     timer = setTimeout(() => finish(false), timeoutMs);
     img.onload = () => {
-      // decode() makes "loaded" mean "ready to paint" — without it the first
-      // draw of a big sheet can stall a frame.
+      // decode() pre-rasterizes so the first draw of a big sheet doesn't
+      // stall a frame — but it is BEST-EFFORT ONLY: Chrome defers decode
+      // work indefinitely for hidden/occluded windows, and gating "loaded"
+      // on it made every asset time out whenever the game loaded in a
+      // background tab. The bytes are fully fetched at onload; worst case a
+      // first draw pays a one-off synchronous decode.
+      const grace = setTimeout(() => finish(true), 250);
       img.decode().then(
-        () => finish(true),
-        () => finish(true),
+        () => {
+          clearTimeout(grace);
+          finish(true);
+        },
+        () => {
+          clearTimeout(grace);
+          finish(true);
+        },
       );
     };
     img.onerror = () => finish(false);
@@ -183,12 +338,34 @@ function loadImageEl(url: string, timeoutMs: number): Promise<HTMLImageElement |
   });
 }
 
+/** One retry per asset: a transient dev-server / network hiccup on a single
+ *  request must not permanently strip a sprite from the whole session. */
+async function loadImageElWithRetry(
+  url: string,
+  timeoutMs: number,
+): Promise<HTMLImageElement | null> {
+  const first = await loadImageEl(url, timeoutMs);
+  if (first) return first;
+  return loadImageEl(url, timeoutMs);
+}
+
+/** Images the scene is unreadable without. Everything else (meebit extras,
+ *  overlay art the DOM loads separately) degrades to a missing draw. */
+const CRITICAL_IMAGES: readonly ImageKey[] = [
+  "backgroundDusk",
+  "midgroundDusk",
+  "foregroundDusk",
+];
+
 /**
  * Load every sprite sheet + static image in the manifest. The `.mp4` title clip
  * is skipped — the UI layer mounts that as a `<video>`.
  *
  * A per-asset timeout means one straggler (or a 404 while art is still being
- * generated) degrades to a missing sprite instead of wedging the preloader.
+ * generated) degrades to a missing sprite instead of wedging the preloader —
+ * but if a SHEET or a parallax layer is still missing after its retry, the
+ * load REJECTS so the UI shows its failure banner instead of silently playing
+ * a run with an invisible world.
  */
 export const loadStuntAssets: LoadAssetsFn = async (onProgress) => {
   const spriteKeys = Object.keys(SPRITES) as SpriteKey[];
@@ -209,16 +386,24 @@ export const loadStuntAssets: LoadAssetsFn = async (onProgress) => {
   await Promise.all([
     ...spriteKeys.map(async (key) => {
       const meta = SPRITES[key];
-      const img = await loadImageEl(meta.url, ASSET_TIMEOUT_MS);
+      const img = await loadImageElWithRetry(meta.url, ASSET_TIMEOUT_MS);
       if (img) sheets[key] = { meta, img };
       bump();
     }),
     ...imageKeys.map(async (key) => {
-      const img = await loadImageEl(IMAGES[key].url, ASSET_TIMEOUT_MS);
+      const img = await loadImageElWithRetry(IMAGES[key].url, ASSET_TIMEOUT_MS);
       if (img) images[key] = img;
       bump();
     }),
   ]);
+
+  const missing: string[] = [
+    ...spriteKeys.filter((k) => !sheets[k]),
+    ...CRITICAL_IMAGES.filter((k) => !images[k]),
+  ];
+  if (missing.length > 0) {
+    throw new Error(`critical assets failed to load: ${missing.join(", ")}`);
+  }
 
   onProgress?.(total, total);
   const bag: StuntAssetBag = { ready: true, sheets, images };
@@ -247,6 +432,66 @@ function toLoadedImage(
 ): LoadedImage | undefined {
   const img = images[key];
   return img ? { meta: IMAGES[key], img } : undefined;
+}
+
+/**
+ * Draw one cell of a meebit walk/idle sheet standing on the road:
+ * bottom-centre anchored at (x, groundY), scaled to `h` design px tall.
+ * The sheets are 8×8 grids (MEEBIT_GRID) with feet at each cell's bottom
+ * edge, so bottom-anchoring is their natural registration; `scaleMul`
+ * squashes/pops about the feet. `seed` offsets the animation phase so a
+ * crowd doesn't idle in lock-step.
+ */
+function drawMeebit(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  x: number,
+  groundY: number,
+  h: number,
+  timeMs: number,
+  seed: number,
+  scaleMul = 1,
+  alpha = 1,
+  row = MEEBIT_IDLE_ROW,
+  fps = MEEBIT_FPS,
+): void {
+  const cw = (img.naturalWidth || MEEBIT_GRID) / MEEBIT_GRID;
+  const ch = (img.naturalHeight || MEEBIT_GRID) / MEEBIT_GRID;
+  const frame = (Math.floor((timeMs / 1000) * fps) + seed) % MEEBIT_GRID;
+  const sx = frame * cw;
+  const sy = row * ch;
+  const dh = h * scaleMul;
+  const dw = (cw / ch) * dh;
+  const needsAlpha = alpha < 1;
+  if (needsAlpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+  }
+  ctx.drawImage(img, sx, sy, cw, ch, x - dw / 2, groundY - dh, dw, dh);
+  if (needsAlpha) ctx.restore();
+}
+
+/** Pulsing cyan pad under a bounce object — marks it as interactive so the
+ *  bounce meebits read differently from the decorative roadside crowd. */
+function drawBouncePad(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  groundY: number,
+  timeMs: number,
+): void {
+  const pulse = 0.26 + 0.1 * Math.sin(timeMs / 280);
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = "#7ff0e4";
+  ctx.beginPath();
+  ctx.ellipse(x, groundY + 4, 105, 17, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = pulse * 0.55;
+  ctx.beginPath();
+  ctx.ellipse(x, groundY + 4, 60, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 // ── Renderer ────────────────────────────────────────────────────────────────
@@ -286,10 +531,15 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const skyBase = (bgImg ? sampleTopLeftColor(bgImg) : null) ?? SKY_BASE_FALLBACK;
   const sky: SkyPaint = createSky(ctx, skyBase, SKY_TOP);
 
-  // ── Canvas sizing (DPR backing store + letterboxed design-space transform) ─
+  // ── Canvas sizing (DPR backing store + fill-the-box design-space transform) ─
+  // Height-fit: the scene always shows the full DESIGN_H rows, and the design
+  // WIDTH follows the container's aspect (clamped) so the canvas fills the box
+  // edge-to-edge — a wider stage sees more world rather than pillar bars.
   let viewScale = 1;
   let viewOffsetX = 0;
   let viewOffsetY = 0;
+  let designW = DESIGN_W;
+  let camAnchorX = DESIGN_W * CAM_ANCHOR_FRAC;
 
   const applySize = () => {
     const rect = container.getBoundingClientRect();
@@ -304,9 +554,12 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       canvas.height = bh;
     }
 
-    viewScale = Math.min(bw / DESIGN_W, bh / DESIGN_H);
-    viewOffsetX = (bw - DESIGN_W * viewScale) / 2;
-    viewOffsetY = (bh - DESIGN_H * viewScale) / 2;
+    viewScale = bh / DESIGN_H;
+    designW = clamp(bw / viewScale, MIN_DESIGN_W, MAX_DESIGN_W);
+    camAnchorX = designW * CAM_ANCHOR_FRAC;
+    // Zero except when the aspect clamp engages (degenerate containers only).
+    viewOffsetX = (bw - designW * viewScale) / 2;
+    viewOffsetY = 0;
 
     // Resizing the backing store resets both the transform and the smoothing
     // flag, so re-apply them here rather than once at construction.
@@ -338,18 +591,86 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
   // ── Drawing ───────────────────────────────────────────────────────────────
 
-  /** World metres -> design-space screen x. `cameraX` lands on CAM_ANCHOR_X. */
+  /** World metres -> design-space screen x. `cameraX` lands on the anchor. */
   const worldToScreenX = (s: EngineState, worldXm: number): number =>
-    (worldXm - s.cameraX) * PX_PER_METER + CAM_ANCHOR_X;
+    (worldXm - s.cameraX) * PX_PER_METER + camAnchorX;
 
-  const drawChris = (s: EngineState) => {
+  /** 1 at surge start → 0 after BOOST_FX_MS; 0 when no recent pickup. */
+  const boostFxT = (s: EngineState): number => {
+    let best = 0;
+    for (let i = 0; i < s.objects.length; i++) {
+      const o = s.objects[i];
+      if (o.kind !== "moonboots" || o.triggeredAtMs === null) continue;
+      const dt = s.timeMs - o.triggeredAtMs;
+      if (dt >= 0 && dt < BOOST_FX_MS) best = Math.max(best, 1 - dt / BOOST_FX_MS);
+    }
+    return best;
+  };
+
+  // Smoothed streak intensity: vx changes DISCONTINUOUSLY at bounces and
+  // arc re-solves, and streaks keyed raw to it popped in/out as hard bars
+  // ("weird lines"). The level chases the live target over ~300ms instead.
+  let streakLevel = 0;
+  let streakLastMs = 0;
+
+  // Feathered streak sprites, built once (lavender for plain speed, cyan for
+  // the moonboots surge).
+  const streakSprite = makeStreakSprite(205, 213, 255);
+  const streakSpriteBoost = makeStreakSprite(159, 247, 236);
+
+  /**
+   * Horizontal wind streaks. World-anchored (they wrap on camera x), moving
+   * slightly faster than the world for a parallax-plus rush; intensity rides
+   * a smoothed vx so acceleration is legible, and the surge tints them cyan.
+   */
+  const drawSpeedStreaks = (s: EngineState, boost: number) => {
+    const inFlight = s.phase === "launching" || s.phase === "flying";
+    const speedFrac = clamp((s.vx - STREAK_MIN_VX) / (STREAK_MAX_VX - STREAK_MIN_VX), 0, 1);
+    const target = inFlight ? Math.max(speedFrac * 0.7, boost) : 0;
+    const dtMs = clamp(s.timeMs - streakLastMs, 0, 100);
+    streakLastMs = s.timeMs;
+    streakLevel += (target - streakLevel) * (1 - Math.exp(-dtMs / 300));
+    if (streakLevel <= 0.04) return;
+
+    const level = streakLevel;
+    const camPx = s.cameraX * PX_PER_METER;
+    const len = 120 + 260 * level;
+    const sprite = boost > 0.15 ? streakSpriteBoost : streakSprite;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // The sprites are smooth gradients; nearest-neighbour sampling would band
+    // them back into hard bars.
+    ctx.imageSmoothingEnabled = true;
+    for (let i = 0; i < STREAK_COUNT; i++) {
+      const h = hash32(i + 991);
+      const lane = (h % 1000) / 1000;
+      const y = 40 + lane * (DESIGN_H - 280) - camY * 0.25;
+      const speedMul = 1.15 + ((h >>> 10) % 40) / 100;
+      const wrapW = designW + len * 2;
+      let x = (((h >>> 4) % wrapW) - camPx * speedMul) % wrapW;
+      if (x < 0) x += wrapW;
+      x -= len;
+      ctx.globalAlpha = level * (0.14 + ((h >>> 16) % 14) / 100) * (1 + boost * 0.8);
+      const w = len * (0.55 + ((h >>> 20) % 50) / 100);
+      ctx.drawImage(sprite, x, y, w, 3 + (h % 3));
+    }
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  };
+
+  const drawChris = (s: EngineState, boost: number) => {
     const key = s.chris.key;
     const anchor = CHRIS_ANCHORS[key] ?? CHRIS_ANCHORS.idle;
     const sheet = sheets[CHRIS_SHEETS[key] ?? "chrisIdle"];
     if (!sheet) return;
 
     const elapsed = s.timeMs - s.chris.startedAtMs;
-    const frame = frameIndexAt(sheet.meta, elapsed);
+    let frame = frameIndexAt(sheet.meta, elapsed);
+    // The death sheet's final frame is an authored blank (fade-out), and the
+    // dying phase (fall + ground dwell) regularly outlives the 2.08s clip —
+    // clamping one frame short keeps the body visible until the result
+    // overlay takes over instead of vanishing mid-air.
+    if (key === "death") frame = Math.min(frame, sheet.meta.frameCount - 2);
 
     let tilt = 0;
     if (s.phase === "flying" || s.phase === "dying" || s.phase === "launching") {
@@ -360,14 +681,122 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     const x = worldToScreenX(s, s.x);
     const y = GROUND_Y - s.y * PX_PER_METER - camY;
+
+    // Moonboots surge: ghost afterimages trailing back along the velocity
+    // vector, strongest nearest the body. Drawn before the main sprite.
+    if (boost > 0 && s.phase === "flying") {
+      for (let g = 3; g >= 1; g--) {
+        const tau = g * 0.038;
+        const gx = x - s.vx * tau * PX_PER_METER;
+        const gy = y + s.vy * tau * PX_PER_METER;
+        drawSheet(ctx, sheet, anchor, gx, gy, frame, opts(false, tilt, (0.34 / g) * boost, 1));
+      }
+    }
+
     drawSheet(ctx, sheet, anchor, x, y, frame, opts(false, tilt, 1, 1));
 
     if (s.phase === "landing") drawDust(ctx, x, y, s.timeMs);
   };
 
+  /**
+   * Roadside decoration: fixed start-line spectators plus a sparse
+   * deterministic crowd along the route, drawn in the far lane (raised,
+   * smaller, slightly dimmed) so they never read as the interactive bounce
+   * objects — those stand full-size in the near lane on a pulsing pad.
+   */
+  const drawCrowd = (s: EngineState) => {
+    const laneY = GROUND_Y - BYSTANDER_LANE_RAISE - camY;
+
+    // Start-line spectators watching the launch from behind Chris; the first
+    // slot is the animated viz dancer, the rest are static meebits.
+    const viz = sheets.viz;
+    for (let i = 0; i < SPECTATOR_XS.length; i++) {
+      const x = worldToScreenX(s, SPECTATOR_XS[i]);
+      if (x < -300 || x > designW + 300) continue;
+      if (i === 0 && viz) {
+        drawSheet(ctx, viz, SPECTATOR_VIZ_ANCHOR, x, laneY, frameIndexAt(viz.meta, s.timeMs));
+        continue;
+      }
+      const img = images[meebitKeyFor(i + 3)];
+      if (img) {
+        drawMeebit(
+          ctx,
+          img,
+          x,
+          laneY,
+          BYSTANDER_H_MIN + (hash32(i) % BYSTANDER_H_VAR),
+          s.timeMs,
+          i * 3,
+          1,
+          0.94,
+        );
+      }
+    }
+
+    // Sparse crowd down the route, hashed off the world slot index so it is
+    // identical every frame and every run (renderer stays replay-stable).
+    // Behaviour buckets, spatially even because the hash is uniform:
+    //   0–5 (60%)  patrol-walkers — ping-pong a ±30–70m route at 2–3.2 m/s,
+    //              playing the profile walk that faces their travel direction
+    //   6–7 (20%)  idle facing the road (front)
+    //   8–9 (20%)  dancing (the viz sheet — the one bespoke action asset)
+    const leftM = s.cameraX - camAnchorX / PX_PER_METER;
+    const rightM = leftM + designW / PX_PER_METER;
+    const k0 = Math.max(1, Math.floor(leftM / BYSTANDER_SPACING_M) - 1);
+    const k1 = Math.ceil(rightM / BYSTANDER_SPACING_M) + 1;
+    for (let k = k0; k <= k1; k++) {
+      const h = hash32(k);
+      if (h % 4 === 0) continue; // leave gaps — a solid picket line reads fake
+      let xm = k * BYSTANDER_SPACING_M + (((h >>> 3) % 120) - 60);
+      const bucket = (h >>> 5) % 10;
+      const height = BYSTANDER_H_MIN + ((h >>> 7) % BYSTANDER_H_VAR);
+      let row = MEEBIT_IDLE_ROW;
+      let fps = MEEBIT_FPS;
+      if (bucket < 6) {
+        // Walker: ping-pong between xm ± amp. Ground speed is matched to the
+        // 12fps stride (1.5 leg-cycles/s) — slower than ~9 m/s the feet churn
+        // faster than the ground passes and the walk reads as a treadmill.
+        // Each leg of a route still runs 9–30 seconds before the turn-around.
+        const ampM = 60 + ((h >>> 9) % 81); // 60–140 m either side
+        const speed = 9.0 + ((h >>> 13) % 41) / 10; // 9.0–13.0 m/s
+        const halfPeriodS = (2 * ampM) / speed;
+        const t = s.timeMs / 1000 + ((h >>> 17) % 100) / 7; // per-slot phase
+        const ph = (t / halfPeriodS) % 2;
+        const tri = ph < 1 ? ph : 2 - ph; // 0..1..0
+        xm += (tri - 0.5) * 2 * ampM;
+        row = ph < 1 ? MEEBIT_WALK_RIGHT_ROW : MEEBIT_WALK_LEFT_ROW;
+        fps = MEEBIT_WALK_FPS;
+      }
+      if (Math.abs(xm - TUNING.rampX) < 80) continue; // keep the ramp art clear
+      const sx = worldToScreenX(s, xm);
+      if (sx < -300 || sx > designW + 300) continue;
+
+      if (bucket >= 8) {
+        // Dancer — the animated viz meebit at background scale, desynced.
+        const viz = sheets.viz;
+        if (!viz) continue;
+        CROWD_VIZ_ANCHOR.scale = height / 653;
+        drawSheet(
+          ctx,
+          viz,
+          CROWD_VIZ_ANCHOR,
+          sx,
+          laneY,
+          frameIndexAt(viz.meta, s.timeMs + (h % 977) * 16),
+          opts(false, 0, 0.9, 1),
+        );
+        continue;
+      }
+
+      const img = images[meebitKeyFor(h)];
+      if (!img) continue;
+      drawMeebit(ctx, img, sx, laneY, height, s.timeMs, h % MEEBIT_GRID, 1, 0.9, row, fps);
+    }
+  };
+
   const drawObject = (s: EngineState, obj: WorldObjectState) => {
     const x = worldToScreenX(s, obj.x);
-    if (x < -DESIGN_W * CULL_SCREENS || x > DESIGN_W * (1 + CULL_SCREENS)) return;
+    if (x < -designW * CULL_SCREENS || x > designW * (1 + CULL_SCREENS)) return;
     const groundY = GROUND_Y - camY;
 
     switch (obj.kind) {
@@ -394,21 +823,30 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         return;
       }
       case "bounce": {
-        const sheet = sheets[BOUNCE_SHEET];
-        if (!sheet) return;
         // Brief pop on contact so the bounce reads without bespoke art.
         let pop = 1;
         if (obj.triggeredAtMs !== null) {
           const t = (s.timeMs - obj.triggeredAtMs) / 220;
           if (t >= 0 && t < 1) pop = 1 + 0.12 * Math.sin(t * Math.PI);
         }
+        drawBouncePad(ctx, x, groundY, s.timeMs + obj.id * 271);
+        // Variant 1 is the animated viz dancer; variant 2 a static meebit
+        // (picked per object id, so the character is stable). Either falls
+        // back to the other if its art is missing.
+        const meebitImg = images[meebitKeyFor(obj.id)];
+        const vizSheet = sheets[BOUNCE_SHEET];
+        if ((obj.variant === 2 && meebitImg) || !vizSheet) {
+          if (!meebitImg) return;
+          drawMeebit(ctx, meebitImg, x, groundY, MEEBIT_H, s.timeMs, obj.id, pop);
+          return;
+        }
         drawSheet(
           ctx,
-          sheet,
+          vizSheet,
           BOUNCE_ANCHOR,
           x,
           groundY,
-          frameIndexAt(sheet.meta, s.timeMs + obj.id * 137),
+          frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
           opts(false, 0, 1, pop),
         );
         return;
@@ -429,27 +867,66 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         drawSheet(ctx, sheet, MOONBOOTS_ANCHOR, x, y, frameIndexAt(sheet.meta, s.timeMs));
         return;
       }
+      case "laser": {
+        // The beam itself is procedural (drawLasers, above Chris); the robot
+        // that fires it stands on the road here. Untriggered robots loop the
+        // clip's head-scan, desynced per object; the trigger plays the full
+        // 45-frame clip once (scan → head tips back → FIRE → recover) and
+        // holds its final frame.
+        const sheet = sheets.robotObstacle;
+        if (!sheet) return;
+        const frame =
+          obj.triggeredAtMs === null
+            ? Math.floor(((s.timeMs + obj.id * 313) / 1000) * sheet.meta.fps) % ROBOT_IDLE_FRAMES
+            : frameIndexAt(sheet.meta, s.timeMs - obj.triggeredAtMs);
+        drawSheet(ctx, sheet, ROBOT_ANCHOR, x, groundY, frame);
+        return;
+      }
       default:
-        // "laser" has no art — drawn procedurally in the pass above Chris.
         return;
     }
   };
 
   const drawLasers = (s: EngineState, chrisX: number, chrisY: number) => {
+    const robotMeta = sheets.robotObstacle?.meta;
     for (let i = 0; i < s.objects.length; i++) {
       const obj = s.objects[i];
       if (obj.kind !== "laser" || obj.triggeredAtMs === null) continue;
-      const elapsed = s.timeMs - obj.triggeredAtMs;
+      // Miss beams erupt at the clip's FIRE flare (trigger + wind-up; the
+      // engine leads the trigger by exactly that, so the zip lands roughly as
+      // Chris passes). The LETHAL beam instead keys to the death moment
+      // itself: the kill is position-anchored (engine dies at atX) while the
+      // clip is time-anchored, and a bounce re-solve inside the wind-up can
+      // drift the two apart — the one beam that must visibly connect is the
+      // one that kills, so it fires exactly when Chris does die.
+      let elapsed: number;
+      if (obj.lethal) {
+        if ((s.phase !== "dying" && s.phase !== "ended") || s.endCause !== "laser") continue;
+        elapsed = s.timeMs - s.chris.startedAtMs;
+      } else {
+        elapsed = s.timeMs - obj.triggeredAtMs - LASER_FIRE_DELAY_MS;
+      }
       if (elapsed < 0 || elapsed > LASER_FLASH_MS) continue;
 
-      const ox = worldToScreenX(s, obj.x);
-      if (ox < -DESIGN_W * CULL_SCREENS || ox > DESIGN_W * (1 + CULL_SCREENS)) continue;
-      const oy = DESIGN_H + 80;
+      const rx = worldToScreenX(s, obj.x);
+      if (rx < -designW * CULL_SCREENS || rx > designW * (1 + CULL_SCREENS)) continue;
+      // Beam origin: the robot's opened visor (falls back to off-screen
+      // bottom if the sheet failed to load — the pillar still reads).
+      const ox = robotMeta
+        ? rx + (ROBOT_EYE_AX - ROBOT_ANCHOR.ax) * robotMeta.srcCanvasW * ROBOT_ANCHOR.scale
+        : rx;
+      const oy = robotMeta
+        ? GROUND_Y - camY - (ROBOT_ANCHOR.ay - ROBOT_EYE_AY) * robotMeta.srcCanvasH * ROBOT_ANCHOR.scale
+        : DESIGN_H + 80;
 
-      // Lethal bolts converge on Chris; near-misses streak past his nose.
-      const tx = obj.lethal ? chrisX : chrisX + 190;
-      const ty = obj.lethal ? chrisY : chrisY - 150;
-      drawLaserBeam(ctx, ox, oy, tx, ty, elapsed / LASER_FLASH_MS, obj.lethal);
+      // The beam is a vertical skyward PILLAR, matching the fire pose (the
+      // head tips fully back; an angled bolt from that pose reads wrong —
+      // and Chris regularly flies at robot-head altitude, where aiming the
+      // beam at him degenerates into a shot through the robot's own body).
+      // Lethal: Chris is exactly at the robot's x when he dies, so he flies
+      // into the pillar; the impact spark marks the hit on him. Misses erupt
+      // just behind a passed Chris (see TUNING.events.laserMissLeadMs).
+      drawLaserPillar(ctx, ox, oy, elapsed / LASER_FLASH_MS, obj.lethal, chrisX, chrisY);
     }
   };
 
@@ -459,7 +936,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     if (!sheet) return;
     const peak = Math.min(POWER_METER_PEAK_FRAME, sheet.meta.frameCount - 1);
     const frame = Math.round(clamp(s.powerFrac, 0, 1) * peak);
-    drawSheet(ctx, sheet, POWER_METER_ANCHOR, DESIGN_W / 2, POWER_METER_Y, frame);
+    drawSheet(ctx, sheet, POWER_METER_ANCHOR, designW / 2, POWER_METER_Y, frame);
   };
 
   const draw = (s: EngineState) => {
@@ -471,29 +948,41 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
 
-    paintSky(ctx, sky, -camY, DESIGN_W, DESIGN_H);
+    // Moonboots surge: the whole scene judders while the FX window decays.
+    const boost = boostFxT(s);
+    ctx.save();
+    if (boost > 0) {
+      const amp = 6 * boost;
+      ctx.translate(Math.sin(s.timeMs * 0.09) * amp, Math.cos(s.timeMs * 0.13) * amp * 0.6);
+    }
 
-    const cameraPx = s.cameraX * PX_PER_METER - CAM_ANCHOR_X;
-    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY, DESIGN_W, DESIGN_H);
-    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY, DESIGN_W, DESIGN_H);
-    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY, DESIGN_W, DESIGN_H);
+    paintSky(ctx, sky, -camY, designW, DESIGN_H);
+
+    const cameraPx = s.cameraX * PX_PER_METER - camAnchorX;
+    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY, designW, DESIGN_H);
+    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY, designW, DESIGN_H);
+    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY, designW, DESIGN_H);
+
+    drawCrowd(s);
 
     // The crashed-UFO ramp is scenery, not a plan event — its world x comes
     // straight from the engine's launch point so the two can never disagree.
     const rampSheet = sheets.rampUfo;
     if (rampSheet) {
       const rx = worldToScreenX(s, TUNING.rampX);
-      if (rx > -DESIGN_W * CULL_SCREENS && rx < DESIGN_W * (1 + CULL_SCREENS)) {
+      if (rx > -designW * CULL_SCREENS && rx < designW * (1 + CULL_SCREENS)) {
         drawSheet(ctx, rampSheet, RAMP_ANCHOR, rx, GROUND_Y - camY, frameIndexAt(rampSheet.meta, s.timeMs));
       }
     }
 
     for (let i = 0; i < s.objects.length; i++) drawObject(s, s.objects[i]);
 
-    drawChris(s);
+    drawSpeedStreaks(s, boost);
+    drawChris(s, boost);
 
     drawLasers(s, worldToScreenX(s, s.x), GROUND_Y - s.y * PX_PER_METER - camY);
     drawPowerMeter(s);
+    ctx.restore();
   };
 
   // ── rAF loop ──────────────────────────────────────────────────────────────
@@ -525,52 +1014,47 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 // ── Procedural FX ───────────────────────────────────────────────────────────
 
 /**
- * Chunky additive beam. No art exists for the lasers, so they're built from
- * three stacked hard-edged bars (wide glow / mid / white core) under
- * `globalCompositeOperation = "lighter"` — bright and pixel-adjacent, with no
- * soft shadowBlur that would fight the pixel-art layers.
+ * Chunky additive skyward beam. No art exists for the beam itself, so it's
+ * built from three stacked hard-edged bars (wide glow / mid / white core)
+ * under `globalCompositeOperation = "lighter"` — bright and pixel-adjacent,
+ * with no soft shadowBlur that would fight the pixel-art layers. The pillar
+ * fires straight UP from the visor at (ox, oy), far past the top of the
+ * frame; a lethal shot also flashes an impact spark on Chris (sparkX/Y).
  */
-function drawLaserBeam(
+function drawLaserPillar(
   ctx: CanvasRenderingContext2D,
   ox: number,
   oy: number,
-  tx: number,
-  ty: number,
   progress: number,
   lethal: boolean,
+  sparkX: number,
+  sparkY: number,
 ): void {
-  const dx = tx - ox;
-  const dy = ty - oy;
-  const dist = Math.hypot(dx, dy);
-  if (!(dist > 0)) return;
-
-  const angle = Math.atan2(dy, dx);
-  const len = dist * 1.6 + 400;
   // Hot for the first third, then a quick fade.
   const a = progress < 0.35 ? 1 : Math.max(0, 1 - (progress - 0.35) / 0.65);
   if (a <= 0) return;
 
+  // Tall enough to leave the frame even with the camera panned far up.
+  const len = oy + DESIGN_H * 2;
   const color = lethal ? LASER_LETHAL_COLOR : LASER_MISS_COLOR;
   const core = LASER_CORE_W * (0.6 + 0.4 * a);
 
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  ctx.translate(ox, oy);
-  ctx.rotate(angle);
 
   ctx.fillStyle = color;
   ctx.globalAlpha = 0.28 * a;
-  ctx.fillRect(0, -core * 3, len, core * 6);
+  ctx.fillRect(ox - core * 3, oy - len, core * 6, len);
   ctx.globalAlpha = 0.55 * a;
-  ctx.fillRect(0, -core * 1.4, len, core * 2.8);
+  ctx.fillRect(ox - core * 1.4, oy - len, core * 2.8, len);
   ctx.globalAlpha = 0.95 * a;
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, -core * 0.5, len, core);
+  ctx.fillRect(ox - core * 0.5, oy - len, core, len);
 
-  // Muzzle flare at the ground end.
+  // Muzzle flare at the robot's visor.
   ctx.globalAlpha = 0.7 * a;
   ctx.fillStyle = color;
-  ctx.fillRect(-24, -core * 4, 110, core * 8);
+  ctx.fillRect(ox - core * 4, oy - 86, core * 8, 110);
   ctx.restore();
 
   if (!lethal || progress > 0.4) return;
@@ -582,11 +1066,11 @@ function drawLaserBeam(
   ctx.globalAlpha = burst;
   ctx.fillStyle = "#ffffff";
   const size = 26 + 70 * (1 - burst);
-  ctx.fillRect(tx - size / 2, ty - size / 2, size, size);
+  ctx.fillRect(sparkX - size / 2, sparkY - size / 2, size, size);
   ctx.globalAlpha = burst * 0.6;
   ctx.fillStyle = color;
-  ctx.fillRect(tx - size, ty - size / 4, size * 2, size / 2);
-  ctx.fillRect(tx - size / 4, ty - size, size / 2, size * 2);
+  ctx.fillRect(sparkX - size, sparkY - size / 4, size * 2, size / 2);
+  ctx.fillRect(sparkX - size / 4, sparkY - size, size / 2, size * 2);
   ctx.restore();
 }
 

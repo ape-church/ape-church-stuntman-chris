@@ -29,13 +29,13 @@ interface StuntmanChrisWindowProps {
  * calls `engine.tick(now)` and draws the scene. React state is never written
  * per frame; the orchestrator's HUD reads `engine.state` through refs.
  *
- * The box is a plain aspect-ratio container (16:9, the scene's design space —
- * see DESIGN_W/DESIGN_H in lib/types.ts) so the window height follows the page
- * width on every breakpoint; on lg the HUD hands it a definite height instead
- * (`lg:h-full` into a 16:9 stage) via `className`. Either way the renderer
- * observes the host and letterbox-fits its internal 1920x1080 buffer, so an
- * off-ratio box degrades to bars rather than distortion. `touch-manipulation`
- * keeps hold-to-charge from triggering double-tap zoom on mobile.
+ * The box is a plain aspect-ratio container (1:1 — the platform's mobile game
+ * presentation) so the window height follows the page width below lg; on lg
+ * the HUD hands it a definite height instead (`lg:h-full lg:aspect-auto`) via
+ * `className`. Either way the renderer observes the host and derives its
+ * design width from the box's aspect, filling it edge-to-edge at any shape.
+ * `touch-manipulation` keeps hold-to-charge from triggering double-tap zoom
+ * on mobile.
  *
  * Teardown races the async import exactly like GhostMachineWindow: a `disposed`
  * flag is checked after every await, and if the component unmounted while the
@@ -101,7 +101,7 @@ export default function StuntmanChrisWindow({
     // `lg:` utility, and the HUD layout needs to override it (GAME-HUD.md §3).
     <div
       className={cn(
-        "relative w-full aspect-[16/9] overflow-hidden bg-[#0b0619] touch-manipulation",
+        "relative w-full aspect-square overflow-hidden bg-[#0b0619] touch-manipulation",
         className,
       )}
     >

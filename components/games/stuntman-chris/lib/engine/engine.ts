@@ -140,6 +140,11 @@ class Engine implements StuntEngine {
   private rideStartMs = 0;
   private holdMs = 0;
   private launchStartMs = 0;
+  /** Ramp-transit shape, fixed at ramp entry (see stepLaunching). */
+  private launchT = 0.2;
+  private launchEntryVx = 0;
+  /** First flight arc, pre-solved at ramp entry; t0 is stamped at the lip. */
+  private pendingArc: Arc | null = null;
 
   private targets: ArcTarget[] = [];
   private targetIdx = 0;
@@ -323,6 +328,7 @@ class Engine implements StuntEngine {
     this.targets = [];
     this.targetIdx = 0;
     this.arc = null;
+    this.pendingArc = null;
     this.finalContact = false;
     this.maxX = 0;
     this.eventCursor = 0;
@@ -396,26 +402,88 @@ class Engine implements StuntEngine {
 
     if (this.s.plan && this.s.x >= TUNING.rampX) {
       this.s.x = TUNING.rampX;
+      // Pre-solve the whole flight NOW: the solver only needs the plan and
+      // the (fixed) lip position, so this is the exact first arc, and the
+      // ramp transit below can be shaped to hand over into it with zero
+      // velocity discontinuity.
+      this.prepareFlight();
+      this.launchEntryVx = Math.max(this.rideSpeed, 1);
+      const exitVx = this.pendingArc ? this.pendingArc.vx0 : this.launchEntryVx;
+      this.launchT = clamp(
+        (2 * TUNING.ride.rampLengthM) / (this.launchEntryVx + exitVx),
+        TUNING.ride.launchMinMs / 1000,
+        TUNING.ride.launchMaxMs / 1000,
+      );
       this.launchStartMs = this.s.timeMs;
-      this.setAnim("flying");
+      // The riding anim continues UP the ramp; the flying pose takes over at
+      // the lip (stepLaunching), not at the ramp's base.
       this.setPhase("launching");
     }
   }
 
+  /**
+   * Ramp transit as a cubic Hermite blend, C¹-continuous with BOTH
+   * neighbours: position/velocity start exactly at the ride state (vx =
+   * entry speed, vy = 0) and end exactly at the pre-solved first arc's
+   * launch velocity at the lip. This is what removes the old "hitch on the
+   * ramp, then slingshot" — there is no instant in the sequence where
+   * velocity jumps.
+   */
   private stepLaunching(): void {
-    const f = clamp((this.s.timeMs - this.launchStartMs) / TUNING.ride.launchMs, 0, 1);
-    this.s.x = TUNING.rampX + f * TUNING.ride.rampLengthM;
-    // Ease the climb so the lip reads as a kick rather than a linear ramp.
-    this.s.y = f * f * TUNING.ride.rampHeightM;
-    const durS = TUNING.ride.launchMs / 1000;
-    this.s.vx = TUNING.ride.rampLengthM / durS;
-    this.s.vy = (2 * f * TUNING.ride.rampHeightM) / durS;
-    if (f >= 1) this.beginFlight();
+    const T = this.launchT;
+    const f = clamp((this.s.timeMs - this.launchStartMs) / (T * 1000), 0, 1);
+    const L = TUNING.ride.rampLengthM;
+    const H = TUNING.ride.rampHeightM;
+    const v0 = this.launchEntryVx;
+    const v1 = this.pendingArc ? this.pendingArc.vx0 : v0;
+    // Cap the lip's vertical tangent: past 3H/T the Hermite would dip the
+    // curve below the road at the ramp's base. Rarely binds; when it does,
+    // the tiny vy step at the lip is invisible next to the launch kick.
+    const vyEnd = Math.min(this.pendingArc ? this.pendingArc.vy0 : 0, (2.5 * H) / T);
+
+    const h00 = 2 * f * f * f - 3 * f * f + 1;
+    const h10 = f * f * f - 2 * f * f + f;
+    const h01 = -2 * f * f * f + 3 * f * f;
+    const h11 = f * f * f - f * f;
+    const d00 = 6 * f * f - 6 * f;
+    const d10 = 3 * f * f - 4 * f + 1;
+    const d01 = -6 * f * f + 6 * f;
+    const d11 = 3 * f * f - 2 * f;
+
+    const x0 = TUNING.rampX;
+    const x1 = TUNING.rampX + L;
+    this.s.x = h00 * x0 + h10 * T * v0 + h01 * x1 + h11 * T * v1;
+    this.s.vx = (d00 * x0 + d10 * T * v0 + d01 * x1 + d11 * T * v1) / T;
+    // y: starts at 0 with zero slope (road), ends at H climbing at the arc's
+    // launch vy — the lip flows straight into the ballistic.
+    this.s.y = h01 * H + h11 * T * vyEnd;
+    this.s.vy = (d01 * H + d11 * T * vyEnd) / T;
+
+    if (f >= 0.8) this.setAnim("flying");
+    if (f >= 1) {
+      this.s.x = x1;
+      this.s.y = H;
+      if (this.pendingArc) {
+        this.arc = { ...this.pendingArc, t0: this.s.timeMs };
+        this.pendingArc = null;
+        this.setAnim("flying");
+        this.setPhase("flying");
+      } else {
+        // Plan vanished mid-transit (cannot happen in practice) — end the
+        // run as a landing rather than wedge.
+        this.beginLanding();
+      }
+    }
   }
 
   // ── flight ────────────────────────────────────────────────────────────────
 
-  private beginFlight(): void {
+  /**
+   * Solve the whole flight structure (skid reserve, targets, first arc) —
+   * called at RAMP ENTRY so the transit can blend into the first arc's exact
+   * launch velocity. Commits no kinematic state; the lip does that.
+   */
+  private prepareFlight(): void {
     const plan = this.s.plan;
     if (!plan) return;
     const startX = TUNING.rampX + TUNING.ride.rampLengthM;
@@ -460,8 +528,6 @@ class Engine implements StuntEngine {
 
     this.targetIdx = 0;
     this.finalContact = false;
-    this.s.x = startX;
-    this.s.y = TUNING.ride.rampHeightM;
 
     // Dry-run every arc up front purely to give airborne pickups an altitude:
     // a moonboots has to sit ON the trajectory or it never visually connects.
@@ -470,7 +536,7 @@ class Engine implements StuntEngine {
     // moonboots surge can reshape the arc it happens on, but never an earlier
     // one, and the provider emits at most one pickup per run).
     let simX = startX;
-    let simY = this.s.y;
+    let simY: number = TUNING.ride.rampHeightM;
     let simT = this.s.timeMs;
     let firstArc: Arc | null = null;
     for (const target of this.targets) {
@@ -485,9 +551,7 @@ class Engine implements StuntEngine {
     // one the provider somehow scripted outside the flown corridor.
     for (const o of this.s.objects) if (o.kind === "moonboots" && o.y === undefined) o.y = 0;
 
-    this.arc = firstArc;
-    this.setAnim("flying");
-    this.setPhase("flying");
+    this.pendingArc = firstArc;
   }
 
   /**
@@ -530,9 +594,21 @@ class Engine implements StuntEngine {
 
   /**
    * Mid-air re-solve (post-moonboots). T comes from the CURRENT vy so there is
-   * no vertical discontinuity; the entire correction goes into vx.
+   * no vertical discontinuity; the correction goes into vx — EXCEPT when that
+   * correction would drop vx below `minVxFloor`. The surge covers span quickly,
+   * so honouring the full remaining fall time used to strand the tail of the
+   * arc at a visible crawl ("boost wears off and he's slower than before").
+   * With the floor, the arc instead arrives sooner, diving as needed; the vy
+   * kink is softened so the nose-down reads as the boost ending, not a snap.
    */
-  private solveContinuingArc(t0: number, x: number, y: number, vy: number, target: ArcTarget): Arc {
+  private solveContinuingArc(
+    t0: number,
+    x: number,
+    y: number,
+    vy: number,
+    target: ArcTarget,
+    minVxFloor = 0,
+  ): Arc {
     const { gravity: g, airDragK: k } = TUNING.world;
     const span = Math.max(target.x - x, 1e-3);
     let vy0 = vy;
@@ -543,6 +619,18 @@ class Engine implements StuntEngine {
     if (T < minT) {
       vy0 = clamp(vyForDuration(y, target.y, minT, g), TUNING.arc.minVy, vyCeilingAt(y));
       T = Math.max(fallTime(y, target.y, vy0, g), 1e-3);
+    } else if (minVxFloor > 0 && vxForSpan(span, k, T) < minVxFloor) {
+      let fastT = Math.max(span / minVxFloor, minT);
+      let fastVy = vyForDuration(y, target.y, fastT, g);
+      // Soften the hand-off: cap the one-frame change in fall rate. If the cap
+      // binds, vx lands somewhere between cruise and the crawl — still a clear
+      // improvement, without a visible mid-air jolt.
+      if (fastVy < vy - 30) {
+        fastVy = vy - 30;
+        fastT = fallTime(y, target.y, fastVy, g);
+      }
+      vy0 = Math.min(fastVy, vyCeilingAt(y));
+      T = Math.max(fastT, 1e-3);
     }
     const vx0 = vxForSpan(span, k, T);
     return { t0, x0: x, y0: y, vx0, vy0, durS: T, onEnd: "contact" };
@@ -573,7 +661,11 @@ class Engine implements StuntEngine {
       const target = this.targets[this.targetIdx];
 
       if (arc.onEnd === "resolve") {
-        this.arc = target ? this.solveContinuingArc(endMs, this.s.x, this.s.y, this.s.vy, target) : null;
+        // Post-surge: never hand the tail of the arc a vx below this run's
+        // cruise speed (see solveContinuingArc).
+        this.arc = target
+          ? this.solveContinuingArc(endMs, this.s.x, this.s.y, this.s.vy, target, this.vxTarget)
+          : null;
         if (this.arc && target) this.annotateAirborneObjects(this.arc, target.x);
         continue;
       }
@@ -610,35 +702,109 @@ class Engine implements StuntEngine {
   private processEvents(): void {
     const plan = this.s.plan;
     if (!plan) return;
-    // Strictly ordered: an event can only fire once its predecessor has. The
-    // bone lead can pull a skeleton's trigger point backwards, and the plan's
-    // minimum event gap is sized to exceed that lead, so this never starves.
+
+    // Skeletons AND lasers trigger by PROXIMITY, outside the ordered cursor:
+    // both have a long wind-up (the 4s throw clip's bone leaves the hand ~1s
+    // in; the laser robot's head tips back for 2s before the beam), so the
+    // lead distance (vx · leadMs) legitimately exceeds the plan's minimum
+    // event gap at speed — a strictly ordered trigger would either fire them
+    // hopelessly late or starve behind an un-reached neighbour.
+    for (let i = 0; i < plan.events.length; i++) {
+      const ev = plan.events[i];
+      if (ev.kind !== "skeleton" && ev.kind !== "laser") continue;
+      const obj = this.s.objects[i];
+      if (!obj || obj.triggeredAtMs !== null) continue;
+      // Lethal wind-ups lead far enough that the shot CONNECTS at atX (the
+      // bone arrives / the beam erupts as Chris does); flavour wind-ups lead
+      // less, so the shot goes off just behind a passed Chris and the
+      // scripted miss reads as a miss.
+      const leadMs =
+        ev.kind === "laser"
+          ? ev.lethal
+            ? TUNING.events.laserLeadMs
+            : TUNING.events.laserMissLeadMs
+          : ev.lethal
+            ? TUNING.events.skeletonLeadMs
+            : TUNING.events.skeletonMissLeadMs;
+      const leadM = Math.max(this.s.vx, 1) * (leadMs / 1000);
+      if (this.s.x < ev.atX - leadM) continue;
+      obj.triggeredAtMs = this.s.timeMs;
+      // The shot is wound up while Chris approaches; it connects at atX.
+      if (ev.lethal && this.pendingLethalX === null) this.pendingLethalX = ev.atX;
+    }
+
+    // Everything else stays strictly ordered: an event fires only once its
+    // predecessor has, at its own atX.
     while (this.eventCursor < plan.events.length) {
       const ev = plan.events[this.eventCursor];
-      const triggerX =
-        ev.kind === "skeleton"
-          ? ev.atX - Math.max(this.s.vx, 1) * (TUNING.events.boneLeadMs / 1000)
-          : ev.atX;
-      if (this.s.x < triggerX) break;
+      if (this.s.x < ev.atX) break;
 
       const obj = this.s.objects[this.eventCursor];
-      if (obj) obj.triggeredAtMs = this.s.timeMs;
       this.eventCursor++;
+      // Skeletons/lasers were handled above; the cursor just steps over them.
+      if (ev.kind === "skeleton" || ev.kind === "laser") continue;
+      if (obj) obj.triggeredAtMs = this.s.timeMs;
 
       if (ev.kind === "moonboots") {
         if (obj) obj.consumed = true;
         this.applyMoonboots();
       }
-      // The bone is in the air at trigger time; it connects at the grave's atX.
       if (ev.lethal && this.pendingLethalX === null) this.pendingLethalX = ev.atX;
     }
   }
 
   private applyMoonboots(): void {
     if (this.s.phase !== "flying" || !this.arc) return;
+    const cur = this.targets[this.targetIdx];
+    if (!cur) return;
+    const { airDragK: k, gravity: g } = TUNING.world;
+
+    // With a bounce head ahead, the boost SKIPS it: Chris rockets clean over
+    // that character and flies on to the FOLLOWING target — as ONE smooth
+    // ballistic arc solved here, pickup → destination. (An earlier version
+    // flew a fast segment to a mid-air waypoint and re-solved there; the
+    // velocity change at the waypoint read as bouncing off an invisible
+    // object.) Head clearance is built into the arc's vertical shape, never
+    // corrected mid-flight. A `final` target is never skipped — the run must
+    // still end exactly on plan.finalDistance.
+    const next = this.targets[this.targetIdx + 1];
+    if (cur.kind === "bounce" && next) {
+      const span = next.x - this.s.x;
+      if (span > TUNING.arc.minSpanM) {
+        this.targetIdx++; // the skipped head stays scenery; it is never landed on
+        const vyCap = vyCeilingAt(this.s.y);
+        let vx0 = Math.min(Math.max(this.s.vx, 1) * TUNING.events.moonbootsVxMult, TUNING.arc.maxVx);
+        let T = Math.max(-Math.log(1 - Math.min((span * k) / vx0, 0.999)) / k, 0.2);
+        let vy0 = vyForDuration(this.s.y, next.y, T, g);
+        if (vy0 > vyCap) {
+          vy0 = vyCap;
+          T = Math.max(fallTime(this.s.y, next.y, vy0, g), 0.2);
+          vx0 = vxForSpan(span, k, T);
+        }
+        // The arc must pass the skipped head above head height. If its natural
+        // shape dips too low there, buy the clearance with lift up front (and
+        // let the horizontal speed re-derive) — still one smooth arc.
+        const skipSpan = cur.x - this.s.x;
+        if (skipSpan > 0.5) {
+          const tSkip = Math.max(-Math.log(1 - Math.min((skipSpan * k) / vx0, 0.999)) / k, 1e-3);
+          const yAtSkip = this.s.y + vy0 * tSkip - 0.5 * g * tSkip * tSkip;
+          const needY = TUNING.world.bounceTopM + 8;
+          if (yAtSkip < needY) {
+            vy0 = Math.min((needY - this.s.y + 0.5 * g * tSkip * tSkip) / tSkip, vyCap);
+            T = Math.max(fallTime(this.s.y, next.y, vy0, g), 0.2);
+            vx0 = vxForSpan(span, k, T);
+          }
+        }
+        this.arc = { t0: this.s.timeMs, x0: this.s.x, y0: this.s.y, vx0, vy0, durS: T, onEnd: "contact" };
+        return;
+      }
+      // Degenerate span (picked up essentially at the next target): fall
+      // through to the plain in-arc surge toward the current target.
+    }
+
+    // No head ahead to skip: plain speed surge within the current arc.
     const target = this.targets[this.targetIdx];
     if (!target) return;
-    const { airDragK: k, gravity: g } = TUNING.world;
     const spanLeft = target.x - this.s.x;
     if (spanLeft <= TUNING.arc.minSpanM) return;
 

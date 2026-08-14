@@ -214,6 +214,15 @@ async function simulate(power: number, rng: () => number, delayFrames: number): 
       if (o.triggeredAtMs !== null && !seenTriggered.has(o.id)) {
         seenTriggered.add(o.id);
         triggerOrder.push(o.id);
+        // A skeleton's or laser robot's trigger LEADS its atX (the throw clip
+        // / the robot's head-tip needs wind-up time) — it must never fire
+        // after Chris has already passed the event.
+        if (o.kind === "skeleton" || o.kind === "laser") {
+          check(
+            s.x <= o.x + 1,
+            `${o.kind} ${o.id} triggered late: x=${s.x.toFixed(1)} past atX=${o.x.toFixed(1)}`,
+          );
+        }
         if (o.kind === "moonboots") {
           // The pickup must sit ON the realized arc or it never connects.
           check(typeof o.y === "number", "moonboots object has no altitude");
@@ -248,20 +257,36 @@ async function simulate(power: number, rng: () => number, delayFrames: number): 
   check(s.plan === plan, "engine adopted a different plan object");
   check(s.endCause === plan.endCause, `endCause ${s.endCause} != plan ${plan.endCause}`);
 
-  // Every event fires exactly once, in plan order.
+  // Every event fires exactly once. Cursor-ordered events fire in plan order;
+  // skeletons and lasers are proximity-triggered with a long lead
+  // (engine.processEvents) so they may legitimately fire before an un-reached
+  // ordered neighbour.
   check(
     triggerOrder.length === plan.events.length,
     `${triggerOrder.length}/${plan.events.length} events triggered`,
   );
-  for (let i = 0; i < triggerOrder.length; i++) {
-    check(triggerOrder[i] === i, `event ${triggerOrder[i]} fired out of order at slot ${i}`);
+  const orderedIds = triggerOrder.filter(
+    (id) => plan.events[id].kind !== "skeleton" && plan.events[id].kind !== "laser",
+  );
+  for (let i = 1; i < orderedIds.length; i++) {
+    check(
+      orderedIds[i] > orderedIds[i - 1],
+      `event ${orderedIds[i]} fired out of order (after ${orderedIds[i - 1]})`,
+    );
   }
   check(bounceUpwardFailures === 0, `${bounceUpwardFailures} bounce(s) produced no upward vy change`);
+  // Moonboots SKIP the next bounce head (engine.applyMoonboots): if the plan
+  // carries a triggered moonboots, exactly one bounce may legitimately go
+  // un-landed. Every other bounce must be contacted.
   const bounces = plan.events.filter((e) => e.kind === "bounce");
   const consumedBounces = bounces.filter((e) => seenConsumed.has(e.id)).length;
+  const moonbootsTriggered = plan.events.some(
+    (e) => e.kind === "moonboots" && seenTriggered.has(e.id),
+  );
+  const minConsumed = Math.max(0, bounces.length - (moonbootsTriggered ? 1 : 0));
   check(
-    consumedBounces === bounces.length,
-    `${consumedBounces}/${bounces.length} bounces were actually landed on`,
+    consumedBounces >= minConsumed,
+    `${consumedBounces}/${bounces.length} bounces landed on (min ${minConsumed})`,
   );
 
   if (plan.endCause === "landed") {
