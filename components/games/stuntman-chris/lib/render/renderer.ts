@@ -311,6 +311,14 @@ function makeStreakSprite(r: number, g: number, b: number): HTMLCanvasElement {
  *  object list — no engine contract change. */
 const BOOST_FX_MS = 1050;
 
+/** Bounce-contact FX window: hit-stop squash, rebound stretch, screen shake.
+ *  The first BOUNCE_SQUASH_MS mirror the engine's bounceHitStopMs freeze. */
+const BOUNCE_FX_MS = 480;
+const BOUNCE_SQUASH_MS = 90;
+const BOUNCE_SHAKE_MS = 320;
+/** Touchdown FX at the start of the landing skid. */
+const LAND_FX_MS = 260;
+
 // ── Assets ──────────────────────────────────────────────────────────────────
 
 export interface StuntAssetBag extends StuntAssets {
@@ -648,6 +656,18 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     return best;
   };
 
+  /** ms since the most recent bounce CONTACT (consumed = actually landed on),
+   *  or Infinity when none. Drives Chris's squash and the contact shake. */
+  const sinceBounceContact = (s: EngineState): number => {
+    let latest = -Infinity;
+    for (let i = 0; i < s.objects.length; i++) {
+      const o = s.objects[i];
+      if (o.kind !== "bounce" || !o.consumed || o.triggeredAtMs === null) continue;
+      if (o.triggeredAtMs > latest) latest = o.triggeredAtMs;
+    }
+    return latest === -Infinity ? Infinity : s.timeMs - latest;
+  };
+
   // Smoothed streak intensity: vx changes DISCONTINUOUSLY at bounces and
   // arc re-solves, and streaks keyed raw to it popped in/out as hard bars
   // ("weird lines"). The level chases the live target over ~300ms instead.
@@ -732,6 +752,37 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const x = worldToScreenX(s, s.x);
     const y = GROUND_Y - s.y * PX_PER_METER - camY;
 
+    // Squash & stretch about the anchor: crushed during the bounce hit-stop,
+    // a stretch overshoot on departure, back to 1 by the end of the window.
+    // The landing touchdown gets a smaller single squash.
+    let sqX = 1;
+    let sqY = 1;
+    const bT = sinceBounceContact(s);
+    if (bT < BOUNCE_SQUASH_MS) {
+      const p = bT / BOUNCE_SQUASH_MS;
+      sqX = 1 + 0.18 * p;
+      sqY = 1 - 0.26 * p;
+    } else if (bT < BOUNCE_FX_MS) {
+      const p = (bT - BOUNCE_SQUASH_MS) / (BOUNCE_FX_MS - BOUNCE_SQUASH_MS);
+      const k = Math.sin(Math.PI * Math.min(p * 1.35, 1)) * (1 - p * 0.55);
+      sqX = 1 - 0.1 * k;
+      sqY = 1 + 0.15 * k;
+    } else if (s.phase === "landing") {
+      const lT = s.timeMs - s.chris.startedAtMs;
+      if (lT < LAND_FX_MS) {
+        const k = Math.sin(Math.PI * (lT / LAND_FX_MS));
+        sqX = 1 + 0.08 * k;
+        sqY = 1 - 0.12 * k;
+      }
+    }
+    const squashed = sqX !== 1 || sqY !== 1;
+    if (squashed) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(sqX, sqY);
+      ctx.translate(-x, -y);
+    }
+
     // Moonboots surge: ghost afterimages trailing back along the velocity
     // vector, strongest nearest the body. Drawn before the main sprite.
     if (boost > 0 && s.phase === "flying") {
@@ -744,6 +795,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     }
 
     drawSheet(ctx, sheet, anchor, x, y, frame, opts(false, tilt, 1, 1));
+    if (squashed) ctx.restore();
 
     if (s.phase === "landing") drawDust(ctx, x, y, s.timeMs);
   };
@@ -998,12 +1050,22 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
 
-    // Moonboots surge: the whole scene judders while the FX window decays.
+    // Screen shake: moonboots surge, bounce contacts and the touchdown all
+    // judder the scene; the strongest active source wins.
     const boost = boostFxT(s);
+    let shakeAmp = 6 * boost;
+    const bT = sinceBounceContact(s);
+    if (bT < BOUNCE_SHAKE_MS) shakeAmp = Math.max(shakeAmp, 11 * (1 - bT / BOUNCE_SHAKE_MS));
+    if (s.phase === "landing") {
+      const lT = s.timeMs - s.chris.startedAtMs;
+      if (lT < LAND_FX_MS) shakeAmp = Math.max(shakeAmp, 8 * (1 - lT / LAND_FX_MS));
+    }
     ctx.save();
-    if (boost > 0) {
-      const amp = 6 * boost;
-      ctx.translate(Math.sin(s.timeMs * 0.09) * amp, Math.cos(s.timeMs * 0.13) * amp * 0.6);
+    if (shakeAmp > 0.1) {
+      ctx.translate(
+        Math.sin(s.timeMs * 0.09) * shakeAmp,
+        Math.cos(s.timeMs * 0.13) * shakeAmp * 0.6,
+      );
     }
 
     paintSky(ctx, sky, -camY, designW, DESIGN_H);

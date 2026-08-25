@@ -215,6 +215,14 @@ export const TUNING = {
      * scripted miss reads as a miss (same idea as skeletonMissLeadMs).
      */
     laserMissLeadMs: 1650,
+    /**
+     * ms — freeze on the bounce contact before the next arc launches. A
+     * classic impact beat: without it the contact and the departure happen in
+     * the same frame and the bounce reads as a mid-air course change rather
+     * than a hit. The renderer keys Chris's squash and the screen shake to
+     * the same moment.
+     */
+    bounceHitStopMs: 90,
     /** ms — duration of the moonboots surge before the arc is re-solved. */
     moonbootsBoostMs: 900,
     /** × — horizontal speed multiplier applied for the surge. 1.35 was

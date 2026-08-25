@@ -652,6 +652,14 @@ class Engine implements StuntEngine {
     while (this.arc && guard++ < 8) {
       const arc = this.arc;
       const tau = (this.s.timeMs - arc.t0) / 1000;
+      if (tau < 0) {
+        // Bounce hit-stop: the next arc's t0 sits in the future; hold the
+        // contact pose until it starts.
+        this.evalArc(arc, 0);
+        this.s.vx = 0;
+        this.s.vy = 0;
+        break;
+      }
       if (tau < arc.durS) {
         this.evalArc(arc, tau);
         break;
@@ -682,7 +690,10 @@ class Engine implements StuntEngine {
         if (obj) obj.consumed = true;
         this.targetIdx++;
         const next = this.targets[this.targetIdx];
-        this.arc = next ? this.solveFreshArc(endMs, this.s.x, this.s.y, next) : null;
+        // Next arc starts after the hit-stop; the loop head holds the contact
+        // pose for the gap.
+        const departMs = endMs + TUNING.events.bounceHitStopMs;
+        this.arc = next ? this.solveFreshArc(departMs, this.s.x, this.s.y, next) : null;
         if (this.arc && next) this.annotateAirborneObjects(this.arc, next.x);
         continue;
       }
