@@ -33,8 +33,11 @@ export const TUNING = {
 
   /** Ballistics. */
   world: {
-    /** m/s² downward. Tuned with `arc.maxT` so a full-power apex stays ~75 m. */
-    gravity: 24,
+    /** m/s² downward. Raised from 24 — at 6 px/m the old value read as
+     *  drifting, not flying; arcs are correspondingly shorter (`arc.minT/maxT`)
+     *  so hops feel snappy rather than floaty. `arc.maxVy` keeps a full-power
+     *  apex ~80 m. */
+    gravity: 34,
     /** 1/s — exponential horizontal air drag: vx(t) = vx0 · e^(−k·t). Mild. */
     airDragK: 0.02,
     /**
@@ -60,8 +63,8 @@ export const TUNING = {
     /** m/s — top ground speed at power 0 / power 1 (only a look; not the launch).
      *  The floor is kept high so even a feeble launch rides up briskly — the
      *  power difference reads in the flight, not in a sluggish approach. */
-    topSpeedMin: 34,
-    topSpeedMax: 52,
+    topSpeedMin: 38,
+    topSpeedMax: 56,
     /** m — horizontal length of the ramp transit, measured from `TUNING.rampX`.
      *  Long enough that the ride→launch speed gain plays as a readable
      *  constant-acceleration slingshot (the transit blend interpolates speed
@@ -103,27 +106,27 @@ export const TUNING = {
      * The floor is the "does low power feel like flying or falling" dial —
      * below ~45 the world visibly crawls at 6 px/m.
      */
-    vxTargetMin: 48,
-    vxTargetMax: 118,
-    /** s — arc duration clamps. maxT caps apex at g·T²/8 ≈ 61 m; it is also
-     *  the hang-time lid — 5.0 read as floaty. */
-    minT: 0.9,
-    maxT: 4.5,
+    vxTargetMin: 60,
+    vxTargetMax: 140,
+    /** s — arc duration clamps. maxT caps apex at g·T²/8 ≈ 49 m; it is also
+     *  the hang-time lid — 4.5 read as floaty. */
+    minT: 0.6,
+    maxT: 3.4,
     /**
      * m/s — launch-velocity clamps. maxVy is the binding altitude constraint:
-     * apex = y0 + maxVy²/(2g) ≈ 89 m off the ramp lip. The renderer can only
+     * apex = y0 + maxVy²/(2g) ≈ 90 m off the ramp lip. The renderer can only
      * keep BOTH Chris and the road in frame below ~130 m, so distance is
      * bought with horizontal speed, never with height.
      */
     minVy: 2,
-    maxVy: 62,
+    maxVy: 74,
     /**
      * m — how high above its launch point an arc may peak, lerped by shaped
      * power. Without this every arc pins to `maxT` and a feeble 200 m launch
      * loops as high as a 3000 m one; with it, power reads vertically (low flat
      * hop → towering arc) as well as horizontally.
      */
-    apexBudgetMin: 34,
+    apexBudgetMin: 50,
     apexBudgetMax: 80,
     /**
      * m — hard altitude ceiling. Every vy the solver hands out is additionally
@@ -147,23 +150,26 @@ export const TUNING = {
      * a deceleration solved from the actual touchdown speed. Two independent
      * bounds keep it sane on both short and long runs.
      */
-    /** s — nominal skid duration; slide ≈ vxTarget · this / 2. */
-    slideSeconds: 2.0,
+    /** s — nominal skid duration; slide ≈ vxTarget · this / 2. Kept short —
+     *  a long grind to a stop after the flight is an anticlimax. */
+    slideSeconds: 1.2,
     /** fraction of finalDistance the skid may occupy. */
     slideMaxFrac: 0.12,
     /** m — absolute slide clamps. */
     slideMinM: 10,
-    slideMaxM: 140,
+    slideMaxM: 80,
     /** ms — dwell on the stopped bike before `ended`. */
     settleMs: 500,
   },
 
   /** Lethal event → ragdoll to the ground. */
   death: {
-    /** 1/s — hard exponential horizontal decay once he's hit. */
-    dragK: 0.9,
+    /** 1/s — exponential horizontal decay once he's hit. 0.9 stopped him
+     *  almost dead mid-air, like striking an invisible wall; a softer decay
+     *  lets the body carry believable momentum into the fall. */
+    dragK: 0.35,
     /** m/s — upward jolt at the moment of impact (sells the hit). */
-    popVy: 6,
+    popVy: 10,
     /** ms — time on the ground playing the death anim before `ended`. */
     groundMs: 1100,
     /**

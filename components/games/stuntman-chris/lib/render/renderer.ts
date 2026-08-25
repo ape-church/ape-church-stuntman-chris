@@ -274,8 +274,8 @@ const CROWD_VIZ_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.3 };
 /** Streaks fade in from this vx (m/s) and saturate at the max. The floor sits
  *  above cruise speed so ordinary flight stays clean — streaks are reserved
  *  for genuinely fast moments (long-span arcs, bounour surges, boosts). */
-const STREAK_MIN_VX = 55;
-const STREAK_MAX_VX = 130;
+const STREAK_MIN_VX = 42;
+const STREAK_MAX_VX = 155;
 const STREAK_COUNT = 9;
 
 /**
@@ -687,7 +687,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const drawSpeedStreaks = (s: EngineState, boost: number) => {
     const inFlight = s.phase === "launching" || s.phase === "flying";
     const speedFrac = clamp((s.vx - STREAK_MIN_VX) / (STREAK_MAX_VX - STREAK_MIN_VX), 0, 1);
-    const target = inFlight ? Math.max(speedFrac * 0.7, boost) : 0;
+    const target = inFlight ? Math.max(speedFrac * 0.85, boost) : 0;
     const dtMs = clamp(s.timeMs - streakLastMs, 0, 100);
     streakLastMs = s.timeMs;
     streakLevel += (target - streakLevel) * (1 - Math.exp(-dtMs / 300));
