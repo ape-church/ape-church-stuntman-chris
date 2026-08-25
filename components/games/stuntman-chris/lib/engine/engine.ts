@@ -383,10 +383,20 @@ class Engine implements StuntEngine {
       this.setAnim("riding");
     }
 
-    let nx = this.s.x + this.rideSpeed * dt;
     if (!this.s.plan) {
       // Outcome still resolving: park short of the ramp rather than launch
       // blind. Bounded, so a dead provider degrades instead of freezing.
+      // Speed is capped by what 2x-accel braking can shed before the hold
+      // point, so the approach eases down instead of slamming from top speed
+      // to a crawl the frame the hold engages.
+      const holdX = TUNING.rampX - TUNING.ride.holdMarginM;
+      const brake = TUNING.ride.accel * 2;
+      const dist = Math.max(holdX - this.s.x, 0);
+      const vCap = Math.sqrt(TUNING.ride.holdSpeed * TUNING.ride.holdSpeed + 2 * brake * dist);
+      this.rideSpeed = Math.min(this.rideSpeed, vCap);
+    }
+    let nx = this.s.x + this.rideSpeed * dt;
+    if (!this.s.plan) {
       const holdX = TUNING.rampX - TUNING.ride.holdMarginM;
       if (nx > holdX) {
         nx = holdX;
