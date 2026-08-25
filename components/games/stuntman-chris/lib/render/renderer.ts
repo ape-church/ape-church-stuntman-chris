@@ -511,7 +511,11 @@ function drawMeebit(
     ctx.save();
     ctx.globalAlpha = alpha;
   }
+  // Meebit cells are true pixel art — nearest-neighbour keeps them crisp
+  // while the rest of the scene draws smoothed.
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(img, sx, sy, cw, ch, x - dw / 2, groundY - dh, dw, dh);
+  ctx.imageSmoothingEnabled = true;
   if (needsAlpha) ctx.restore();
 }
 
@@ -607,8 +611,13 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     // Resizing the backing store resets both the transform and the smoothing
     // flag, so re-apply them here rather than once at construction.
+    // Smoothing ON: the layers and character sheets are high-res RENDERED art
+    // (not chunky pixel art), and nearest-neighbour sampling at fractional
+    // camera offsets made every sprite shimmer/crawl in motion. The one
+    // genuinely pixel-art asset family — the 80px-cell meebit sheets — opts
+    // back out per draw (see drawMeebit).
     ctx.setTransform(viewScale, 0, 0, viewScale, viewOffsetX, viewOffsetY);
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
   };
 
   applySize();
@@ -748,9 +757,6 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const sprite = boost > 0.15 ? streakSpriteBoost : streakSprite;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    // The sprites are smooth gradients; nearest-neighbour sampling would band
-    // them back into hard bars.
-    ctx.imageSmoothingEnabled = true;
     for (let i = 0; i < STREAK_COUNT; i++) {
       const h = hash32(i + 991);
       const lane = (h % 1000) / 1000;
@@ -764,7 +770,6 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       const w = len * (0.55 + ((h >>> 20) % 50) / 100);
       ctx.drawImage(sprite, x, y, w, 3 + (h % 3));
     }
-    ctx.imageSmoothingEnabled = false;
     ctx.restore();
   };
 
