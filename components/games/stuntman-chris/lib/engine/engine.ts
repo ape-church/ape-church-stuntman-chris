@@ -578,8 +578,17 @@ class Engine implements StuntEngine {
     const span = Math.max(target.x - x0, 1e-3);
 
     // Two independent lids on the climb: this run's power budget (looks) and
-    // the absolute frame ceiling (the renderer's hard constraint).
-    const vyMax = Math.min(vyCeilingAt(y0), Math.sqrt(2 * g * this.apexBudget));
+    // the absolute frame ceiling (the renderer's hard constraint). The budget
+    // lid is a look, not a contract — an arc must still be able to REACH a
+    // raised target (the bounce deck) from a low launch, or the clamp hands
+    // back a trajectory that peaks below the deck and the contact snap
+    // teleports Chris up onto it. The reach floor guarantees the arc arrives
+    // with a few metres of apex clearance; the absolute ceiling still wins.
+    const vyReach = target.y > y0 ? Math.sqrt(2 * g * (target.y - y0 + 4)) : 0;
+    const vyMax = Math.min(
+      Math.max(Math.sqrt(2 * g * this.apexBudget), vyReach),
+      vyCeilingAt(y0),
+    );
     let T = clamp(span / Math.max(this.vxTarget, 1), A.minT, A.maxT);
     let vy0 = vyForDuration(y0, target.y, T, g);
     if (vy0 > vyMax || vy0 < A.minVy) {
