@@ -33,7 +33,7 @@
 export const DESIGN_W = 1920;
 export const DESIGN_H = 1080;
 /** Foreground world-to-screen scale. Parallax layers scroll at a fraction of this. */
-export const PX_PER_METER = 6;
+export const PX_PER_METER = 8;
 
 // ── Flight plan (the scripted outcome) ──────────────────────────────────────
 

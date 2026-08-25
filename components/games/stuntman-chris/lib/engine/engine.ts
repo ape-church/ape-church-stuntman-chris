@@ -35,6 +35,12 @@
  * rate did. Correction is therefore never a visible jump — it lives entirely
  * in the (constant, per-arc) choice of vx0.
  *
+ * An arc OFF a bounce head is the one arc not shaped from scratch: its
+ * vertical launch is the arrival vy reflected (× restitution) and the
+ * horizontal speed is held within a band of the arrival vx, re-timing with
+ * lift when the two conflict — so a bounce reads as momentum carried through
+ * a springy body rather than a fresh launch (see solveBounceArc).
+ *
  * Two events perturb an arc mid-flight and are handled by RE-SOLVING rather
  * than by nudging:
  *   • moonboots — a short boosted segment (higher vx, upward kick), after
@@ -612,6 +618,47 @@ class Engine implements StuntEngine {
   }
 
   /**
+   * Arc off a bounce head (see TUNING.bounce). Vertical = reflected arrival;
+   * horizontal = whatever covers the span in that time, held within a band
+   * of the arrival vx by re-timing the arc with more or less lift. Arrives
+   * exactly on the target like every other arc.
+   */
+  private solveBounceArc(
+    t0: number,
+    x0: number,
+    y0: number,
+    vxIn: number,
+    vyIn: number,
+    target: ArcTarget,
+  ): Arc {
+    const { gravity: g, airDragK: k } = TUNING.world;
+    const B = TUNING.bounce;
+    const span = Math.max(target.x - x0, 1e-3);
+    const vxRef = Math.max(vxIn, 1);
+    const vyCap = vyCeilingAt(y0);
+    // Must still reach a raised target (same guard as solveFreshArc), and
+    // must visibly climb off the head (bounce.minRiseM).
+    const vyFloor = Math.max(
+      TUNING.arc.minVy,
+      Math.sqrt(2 * g * B.minRiseM),
+      target.y > y0 ? Math.sqrt(2 * g * (target.y - y0 + 4)) : 0,
+    );
+
+    let vy0 = clamp(Math.abs(vyIn) * B.restitution, vyFloor, vyCap);
+    let T = fallTime(y0, target.y, vy0, g);
+
+    const tFast = span / (vxRef * B.vxGainMax); // shortest arc the band allows
+    const tSlow = span / (vxRef * B.vxLossMax); // longest arc the band allows
+    if (T < tFast || T > tSlow) {
+      const tWant = T < tFast ? tFast : tSlow;
+      vy0 = clamp(vyForDuration(y0, target.y, tWant, g), vyFloor, vyCap);
+      T = fallTime(y0, target.y, vy0, g);
+    }
+    const vx0 = vxForSpan(span, k, Math.max(T, 1e-3));
+    return { t0, x0, y0, vx0, vy0, durS: Math.max(T, 1e-3), onEnd: "contact" };
+  }
+
+  /**
    * Mid-air re-solve (post-moonboots). T comes from the CURRENT vy so there is
    * no vertical discontinuity; the correction goes into vx — EXCEPT when that
    * correction would drop vx below `minVxFloor`. The surge covers span quickly,
@@ -710,9 +757,12 @@ class Engine implements StuntEngine {
         this.targetIdx++;
         const next = this.targets[this.targetIdx];
         // Next arc starts after the hit-stop; the loop head holds the contact
-        // pose for the gap.
+        // pose for the gap. evalArc(durS) above left the ARRIVAL velocity in
+        // s.vx/vy — the bounce is solved off that, not from scratch.
         const departMs = endMs + TUNING.events.bounceHitStopMs;
-        this.arc = next ? this.solveFreshArc(departMs, this.s.x, this.s.y, next) : null;
+        this.arc = next
+          ? this.solveBounceArc(departMs, this.s.x, this.s.y, this.s.vx, this.s.vy, next)
+          : null;
         if (this.arc && next) this.annotateAirborneObjects(this.arc, next.x);
         continue;
       }

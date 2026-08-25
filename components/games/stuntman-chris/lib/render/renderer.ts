@@ -100,15 +100,15 @@ const CAM_FALL_LOOKAHEAD_S = 0.15;
  * edge keeps meeting the canvas bottom) and all the extra view goes to the
  * sky above, so no out-of-art gap is ever exposed.
  */
-const ZOOM_MIN = 0.68;
+const ZOOM_MIN = 0.78;
 const ZOOM_TAU_MS = 350;
 /** m — altitude at which the altitude term reaches full zoom-out. */
 const ZOOM_ALT_FULL_M = 110;
-const ZOOM_ALT_WEIGHT = 0.32;
+const ZOOM_ALT_WEIGHT = 0.2;
 /** m/s band over which the speed term fades in, and its weight. */
-const ZOOM_SPD_MIN = 60;
-const ZOOM_SPD_MAX = 180;
-const ZOOM_SPD_WEIGHT = 0.1;
+const ZOOM_SPD_MIN = 100;
+const ZOOM_SPD_MAX = 280;
+const ZOOM_SPD_WEIGHT = 0.06;
 
 const PARALLAX_BG = 0.1;
 const PARALLAX_MID = 0.35;
@@ -271,7 +271,7 @@ const MEEBIT_WALK_FPS = 12;
 const MEEBIT_H = 314;
 
 /** Roadside crowd: one candidate slot every this many metres of world. */
-const BYSTANDER_SPACING_M = 210;
+const BYSTANDER_SPACING_M = 160;
 /** Far-lane offset and size band for crowd meebits (smaller + higher = depth). */
 const BYSTANDER_LANE_RAISE = 36;
 const BYSTANDER_H_MIN = 175;
@@ -292,8 +292,8 @@ const CROWD_VIZ_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.3 };
 /** Streaks fade in from this vx (m/s) and saturate at the max. The floor sits
  *  above cruise speed so ordinary flight stays clean — streaks are reserved
  *  for genuinely fast moments (long-span arcs, bounour surges, boosts). */
-const STREAK_MIN_VX = 42;
-const STREAK_MAX_VX = 155;
+const STREAK_MIN_VX = 70;
+const STREAK_MAX_VX = 260;
 const STREAK_COUNT = 9;
 
 /**
@@ -979,32 +979,50 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         return;
       }
       case "bounce": {
-        // Brief pop on contact so the bounce reads without bespoke art.
-        let pop = 1;
-        if (obj.triggeredAtMs !== null) {
-          const t = (s.timeMs - obj.triggeredAtMs) / 220;
-          if (t >= 0 && t < 1) pop = 1 + 0.12 * Math.sin(t * Math.PI);
+        // The character takes the hit: crushed about the feet while Chris is
+        // on their head (the hit-stop window), then a springy over-stretch
+        // that settles — a bounce off a body, not a mid-air course change.
+        let sqX = 1;
+        let sqY = 1;
+        if (obj.consumed && obj.triggeredAtMs !== null) {
+          const t = s.timeMs - obj.triggeredAtMs;
+          if (t < BOUNCE_SQUASH_MS) {
+            const p = t / BOUNCE_SQUASH_MS;
+            sqX = 1 + 0.28 * p;
+            sqY = 1 - 0.34 * p;
+          } else if (t < BOUNCE_FX_MS) {
+            const p = (t - BOUNCE_SQUASH_MS) / (BOUNCE_FX_MS - BOUNCE_SQUASH_MS);
+            const kk = Math.sin(Math.PI * Math.min(p * 1.35, 1)) * (1 - p * 0.55);
+            sqX = 1 - 0.12 * kk;
+            sqY = 1 + 0.2 * kk;
+          }
         }
         drawBouncePad(ctx, x, gy, s.timeMs + obj.id * 271);
+        const squashed = sqX !== 1 || sqY !== 1;
+        if (squashed) {
+          ctx.save();
+          ctx.translate(x, gy);
+          ctx.scale(sqX, sqY);
+          ctx.translate(-x, -gy);
+        }
         // Variant 1 is the animated viz dancer; variant 2 a static meebit
         // (picked per object id, so the character is stable). Either falls
         // back to the other if its art is missing.
         const meebitImg = images[meebitKeyFor(obj.id)];
         const vizSheet = sheets[BOUNCE_SHEET];
         if ((obj.variant === 2 && meebitImg) || !vizSheet) {
-          if (!meebitImg) return;
-          drawMeebit(ctx, meebitImg, x, gy, MEEBIT_H, s.timeMs, obj.id, pop);
-          return;
+          if (meebitImg) drawMeebit(ctx, meebitImg, x, gy, MEEBIT_H, s.timeMs, obj.id);
+        } else {
+          drawSheet(
+            ctx,
+            vizSheet,
+            BOUNCE_ANCHOR,
+            x,
+            gy,
+            frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
+          );
         }
-        drawSheet(
-          ctx,
-          vizSheet,
-          BOUNCE_ANCHOR,
-          x,
-          gy,
-          frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
-          opts(false, 0, 1, pop),
-        );
+        if (squashed) ctx.restore();
         return;
       }
       case "blocker": {
