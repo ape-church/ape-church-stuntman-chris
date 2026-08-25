@@ -211,6 +211,56 @@ class SfxManager {
     return this.loops.has(name);
   }
 
+  /** Re-pitch a running loop (engine revs following speed). */
+  setLoopRate(name: SfxName, rate: number): void {
+    const h = this.loops.get(name);
+    if (!h || !this.ctx) return;
+    h.src.playbackRate.setTargetAtTime(rate, this.ctx.currentTime, 0.06);
+  }
+
+  private noiseBuffer: AudioBuffer | null = null;
+
+  /**
+   * Synthesized air whoosh (no clip shipped for it): a short burst of white
+   * noise through a band-pass whose centre sweeps up then down, with a
+   * fast-attack / long-release envelope. `rate` scales the sweep and length.
+   */
+  whoosh(opts?: { volume?: number; rate?: number }): void {
+    this.unlock();
+    if (!this.ctx || !this.master) return;
+    const ctx = this.ctx;
+    if (!this.noiseBuffer) {
+      const len = Math.floor(ctx.sampleRate * 1.0);
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      let seed = 0x9e3779b9;
+      for (let i = 0; i < len; i++) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        d[i] = seed / 2147483648 - 1;
+      }
+      this.noiseBuffer = buf;
+    }
+    const rate = opts?.rate ?? 1;
+    const dur = 0.42 / rate;
+    const t0 = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = 1.6;
+    bp.frequency.setValueAtTime(500 * rate, t0);
+    bp.frequency.exponentialRampToValueAtTime(2400 * rate, t0 + dur * 0.35);
+    bp.frequency.exponentialRampToValueAtTime(600 * rate, t0 + dur);
+    const gain = ctx.createGain();
+    const v = opts?.volume ?? 0.5;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(v, t0 + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(bp).connect(gain).connect(this.master);
+    src.start(t0);
+    src.stop(t0 + dur + 0.05);
+  }
+
   /** Ramp a running loop's volume (e.g. wind following airspeed). */
   setLoopVolume(name: SfxName, volume: number): void {
     const h = this.loops.get(name);

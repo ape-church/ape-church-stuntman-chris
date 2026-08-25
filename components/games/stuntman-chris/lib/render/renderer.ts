@@ -57,6 +57,16 @@ const GROUND_Y = 962;
 
 /** Chris is pinned this fraction across the screen; `cameraX` is the world x here. */
 const CAM_ANCHOR_FRAC = 0.3;
+/**
+ * Look-ahead: in flight the anchor slides from CAM_ANCHOR_SLOW_FRAC toward
+ * CAM_ANCHOR_FAST_FRAC as vx rises, so a fast Chris sits further left and
+ * the camera shows more of the road he is about to cover.
+ */
+const CAM_ANCHOR_SLOW_FRAC = 0.34;
+const CAM_ANCHOR_FAST_FRAC = 0.2;
+const CAM_ANCHOR_SPD_MIN = 80;
+const CAM_ANCHOR_SPD_MAX = 240;
+const CAM_ANCHOR_TAU_MS = 450;
 
 /**
  * Clamps on the dynamic design width (see `applySize`). The scene always
@@ -70,9 +80,60 @@ const CAM_ANCHOR_FRAC = 0.3;
 const MIN_DESIGN_W = 720;
 const MAX_DESIGN_W = 2600;
 
-/** Camera pans up once Chris climbs above this screen y. */
-const CHRIS_TOP_Y = DESIGN_H * 0.28;
+/** Camera pans up once Chris climbs above this fraction of the view height. */
+const CHRIS_TOP_FRAC = 0.28;
 const CAM_SMOOTH_TAU_MS = 150;
+/**
+ * Horizontal camera smoothing. The engine's cameraX tracks Chris exactly, but
+ * his vx steps discontinuously at every bounce contact and mid-air re-solve —
+ * hard-locking the camera to it turned each step into a full-screen jerk. The
+ * camera instead integrates a smoothed velocity (vx steps spread over ~120ms)
+ * with a gentle position pull toward the true cameraX, so steady-state
+ * tracking stays exact (no drift off the anchor at 150+ m/s) while the jumps
+ * are invisible.
+ */
+const CAM_VX_TAU_MS = 120;
+const CAM_POS_TAU_MS = 250;
+/** Chris's flight tilt chases its velocity-derived target over this window —
+ *  raw tilt flips sign in a single frame at a bounce contact. */
+const TILT_TAU_MS = 90;
+/** s — during a descent the vertical camera aims this far ahead of Chris's
+ *  fall so a steep drop doesn't leave him pinned at the bottom of the frame
+ *  while the camera catches up. */
+const CAM_FALL_LOOKAHEAD_S = 0.15;
+
+/**
+ * Dynamic zoom: the camera pulls back as Chris climbs (and a little as he
+ * speeds up), so altitude reads as altitude instead of the world scrolling
+ * past a fixed frame. Zooming widens the visible design-space window — the
+ * road stays glued to its band near the bottom (the foreground art's bottom
+ * edge keeps meeting the canvas bottom) and all the extra view goes to the
+ * sky above, so no out-of-art gap is ever exposed.
+ */
+const ZOOM_MIN = 0.78;
+const ZOOM_TAU_MS = 350;
+/** m — altitude at which the altitude term reaches full zoom-out. */
+const ZOOM_ALT_FULL_M = 110;
+const ZOOM_ALT_WEIGHT = 0.2;
+/** m/s band over which the speed term fades in, and its weight. */
+const ZOOM_SPD_MIN = 100;
+const ZOOM_SPD_MAX = 280;
+const ZOOM_SPD_WEIGHT = 0.06;
+/** Charging: the camera creeps in with the meter (tension), and the release
+ *  lets it go. Dying: it tightens on the body. */
+const ZOOM_CHARGE_MAX = 0.06;
+const ZOOM_CHARGE_TAU_MS = 140;
+const ZOOM_DEATH = 1.14;
+const ZOOM_DEATH_TAU_MS = 220;
+/**
+ * Zoom punches: one-shot impulses layered on the zoom target that decay
+ * over ZOOM_PUNCH_TAU_MS — in on a bounce contact and the touchdown, out at
+ * the ramp lip (the pull-back reads as acceleration).
+ */
+const ZOOM_PUNCH_BOUNCE = 0.07;
+const ZOOM_PUNCH_LAND = 0.05;
+const ZOOM_PUNCH_LAUNCH = -0.05;
+const ZOOM_PUNCH_TAU_MS = 150;
 
 const PARALLAX_BG = 0.1;
 const PARALLAX_MID = 0.35;
@@ -235,7 +296,7 @@ const MEEBIT_WALK_FPS = 12;
 const MEEBIT_H = 314;
 
 /** Roadside crowd: one candidate slot every this many metres of world. */
-const BYSTANDER_SPACING_M = 210;
+const BYSTANDER_SPACING_M = 160;
 /** Far-lane offset and size band for crowd meebits (smaller + higher = depth). */
 const BYSTANDER_LANE_RAISE = 36;
 const BYSTANDER_H_MIN = 175;
@@ -256,8 +317,8 @@ const CROWD_VIZ_ANCHOR: SpriteAnchor = { ax: 0.5, ay: 1.0, scale: 0.3 };
 /** Streaks fade in from this vx (m/s) and saturate at the max. The floor sits
  *  above cruise speed so ordinary flight stays clean — streaks are reserved
  *  for genuinely fast moments (long-span arcs, bounour surges, boosts). */
-const STREAK_MIN_VX = 55;
-const STREAK_MAX_VX = 130;
+const STREAK_MIN_VX = 70;
+const STREAK_MAX_VX = 260;
 const STREAK_COUNT = 9;
 
 /**
@@ -292,6 +353,51 @@ function makeStreakSprite(r: number, g: number, b: number): HTMLCanvasElement {
  *  instead of cutting. The renderer reads the pickup's triggeredAtMs off the
  *  object list — no engine contract change. */
 const BOOST_FX_MS = 1050;
+
+/** Bounce-contact FX window: hit-stop squash, rebound stretch, screen shake.
+ *  The first BOUNCE_SQUASH_MS mirror the engine's bounceHitStopMs freeze. */
+const BOUNCE_FX_MS = 480;
+/** Engine ms — matches TUNING.bounce.slowMoMs so the crush plays inside the
+ *  slow-motion window and the spring-back lands as time resumes. */
+const BOUNCE_SQUASH_MS = 60;
+const BOUNCE_SHAKE_MS = 320;
+/** Chris backflips off the head: a full turn over this window, easing in
+ *  and out, starting as the crush releases. */
+const BOUNCE_FLIP_MS = 520;
+/** Design px from the flying anchor up to the sprite's visual centre — the
+ *  flip spins about the body, not the wheels. */
+const CHRIS_FLIP_PIVOT_UP = 72;
+/** Impact ring + sparks at the contact point. */
+const BOUNCE_BURST_MS = 320;
+const BOUNCE_BURST_R = 150;
+/** The hit character rocks back on their heels and settles. */
+const BOUNCE_WOBBLE_MS = 620;
+
+/** Run-up wheelie: nose-up tilt (rad) at full acceleration, pivoting about
+ *  the rear wheel (design px behind the bike anchor). */
+const WHEELIE_MAX_RAD = 0.3;
+const WHEELIE_PIVOT_BACK = 80;
+const WHEELIE_TAU_MS = 140;
+/** Dust/spark kick as the wheels leave the ramp lip. */
+const LIP_BURST_MS = 320;
+const LIP_BURST_COLOR = "#ffc37a";
+/** Death: the body tumbles forward while airborne (rad/s from vx), then
+ *  eases flat on the ground; the ground impact throws a dust puff. */
+const TUMBLE_RATE_MIN = 3;
+const TUMBLE_RATE_MAX = 8;
+const TUMBLE_SETTLE_TAU_MS = 90;
+const THUD_BURST_MS = 360;
+const THUD_BURST_COLOR = "#b9a7d6";
+const THUD_SHAKE_MS = 240;
+/** Landing skid: tire mark + speed-scaled dust plume; the camera tightens
+ *  on the stopped bike before the result card. */
+const SKID_MARK_H = 9;
+const SKID_MARK_ALPHA = 0.65;
+const DUST_MAX_VX = 220;
+const ZOOM_STOPPED = 1.12;
+const ZOOM_STOPPED_TAU_MS = 320;
+/** Touchdown FX at the start of the landing skid. */
+const LAND_FX_MS = 260;
 
 // ── Assets ──────────────────────────────────────────────────────────────────
 
@@ -467,7 +573,11 @@ function drawMeebit(
     ctx.save();
     ctx.globalAlpha = alpha;
   }
+  // Meebit cells are true pixel art — nearest-neighbour keeps them crisp
+  // while the rest of the scene draws smoothed.
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(img, sx, sy, cw, ch, x - dw / 2, groundY - dh, dw, dh);
+  ctx.imageSmoothingEnabled = true;
   if (needsAlpha) ctx.restore();
 }
 
@@ -563,8 +673,13 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     // Resizing the backing store resets both the transform and the smoothing
     // flag, so re-apply them here rather than once at construction.
+    // Smoothing ON: the layers and character sheets are high-res RENDERED art
+    // (not chunky pixel art), and nearest-neighbour sampling at fractional
+    // camera offsets made every sprite shimmer/crawl in motion. The one
+    // genuinely pixel-art asset family — the 80px-cell meebit sheets — opts
+    // back out per draw (see drawMeebit).
     ctx.setTransform(viewScale, 0, 0, viewScale, viewOffsetX, viewOffsetY);
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
   };
 
   applySize();
@@ -572,15 +687,157 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const ro = new ResizeObserver(() => applySize());
   ro.observe(container);
 
-  // ── Camera (presentation-only; horizontal comes straight from the engine) ──
+  // ── Camera (presentation-only smoothing over the engine's camera) ─────────
   let camY = 0;
+  let camX = 0;
+  let camVx = 0;
   let lastNow = 0;
 
+  // Zoom + the view-space window it derives (see ZOOM_MIN). All draw code
+  // works in view units: `viewW × viewH` visible design px with the road at
+  // `groundY`; the frame transform maps that onto the canvas.
+  let zoom = 1;
+  let viewW = designW;
+  let viewH = DESIGN_H;
+  let groundY = GROUND_Y;
+  let anchorFrac = CAM_ANCHOR_FRAC;
+  let zoomPunch = 0;
+  let prevPhase = engine.state.phase;
+  let bouncePunched = false;
+  /** Engine ms of one-shot moments the renderer keys FX to. */
+  let lipMs = -Infinity;
+  let thudMs = -Infinity;
+  /** World x where the landing skid began (tire mark start); null = none. */
+  let skidStartX: number | null = null;
+  let prevY = 0;
+  let prevVx = 0;
+  let rideAccel = 0;
+  let wheelie = 0;
+  let tumble = 0;
+
+  const updateZoom = (s: EngineState, dtMs: number) => {
+    const dt = Math.max(0, dtMs);
+    const inRun =
+      s.phase === "launching" ||
+      s.phase === "flying" ||
+      s.phase === "dying" ||
+      s.phase === "landing";
+
+    // One-shot punches on phase edges and bounce contacts.
+    if (s.phase !== prevPhase) {
+      if (s.phase === "flying" && prevPhase === "launching") {
+        zoomPunch = ZOOM_PUNCH_LAUNCH;
+        lipMs = s.timeMs;
+      } else if (s.phase === "landing") {
+        zoomPunch = ZOOM_PUNCH_LAND;
+        skidStartX = s.x;
+      } else if (s.phase === "ready" || s.phase === "riding") {
+        skidStartX = null;
+        lipMs = -Infinity;
+        thudMs = -Infinity;
+        tumble = 0;
+      }
+      prevPhase = s.phase;
+    }
+    // Dead body hits the road.
+    if (s.phase === "dying" && s.y <= 0.001 && prevY > 0.001) thudMs = s.timeMs;
+    prevY = s.y;
+
+    // Run-up: smoothed acceleration estimate drives the wheelie.
+    if (dt > 0) {
+      const a = ((s.vx - prevVx) * 1000) / dt;
+      rideAccel += (a - rideAccel) * (1 - Math.exp(-dt / 120));
+    }
+    prevVx = s.vx;
+    const wheelieTarget =
+      s.phase === "riding" ? -WHEELIE_MAX_RAD * clamp(rideAccel / TUNING.ride.accel, 0, 1) : 0;
+    wheelie += (wheelieTarget - wheelie) * (1 - Math.exp(-dt / WHEELIE_TAU_MS));
+
+    // Death tumble: spin while airborne, settle flat once down.
+    if (s.phase === "dying") {
+      if (s.y > 0.001) {
+        const rate = clamp(s.vx / 40, TUMBLE_RATE_MIN, TUMBLE_RATE_MAX);
+        tumble += (rate * dt) / 1000;
+      } else {
+        const rest = Math.round(tumble / (2 * Math.PI)) * 2 * Math.PI;
+        tumble += (rest - tumble) * (1 - Math.exp(-dt / TUMBLE_SETTLE_TAU_MS));
+      }
+    }
+    const bT = sinceBounceContact(s);
+    if (bT < 40) {
+      if (!bouncePunched) zoomPunch = ZOOM_PUNCH_BOUNCE;
+      bouncePunched = true;
+    } else {
+      bouncePunched = false;
+    }
+    zoomPunch *= Math.exp(-dt / ZOOM_PUNCH_TAU_MS);
+
+    let target = 1;
+    let tau = ZOOM_TAU_MS;
+    if (s.phase === "charging") {
+      target = 1 + ZOOM_CHARGE_MAX * clamp(s.powerFrac, 0, 1);
+      tau = ZOOM_CHARGE_TAU_MS;
+    } else if (s.phase === "dying") {
+      target = ZOOM_DEATH;
+      tau = ZOOM_DEATH_TAU_MS;
+    } else if (s.phase === "ended") {
+      target = zoom; // hold whatever the ending settled on under the result card
+    } else if (s.phase === "landing" && s.vx < 2) {
+      target = ZOOM_STOPPED;
+      tau = ZOOM_STOPPED_TAU_MS;
+    } else if (inRun) {
+      const altFrac = clamp(s.y / ZOOM_ALT_FULL_M, 0, 1);
+      const spdFrac = clamp((s.vx - ZOOM_SPD_MIN) / (ZOOM_SPD_MAX - ZOOM_SPD_MIN), 0, 1);
+      target = clamp(1 - ZOOM_ALT_WEIGHT * altFrac - ZOOM_SPD_WEIGHT * spdFrac, ZOOM_MIN, 1);
+    }
+    target *= 1 + zoomPunch;
+    if (s.phase === "title" || s.phase === "ready") zoom = target;
+    else zoom += (target - zoom) * (1 - Math.exp(-dt / tau));
+
+    // Look-ahead anchor (see CAM_ANCHOR_*_FRAC).
+    const spd = clamp((s.vx - CAM_ANCHOR_SPD_MIN) / (CAM_ANCHOR_SPD_MAX - CAM_ANCHOR_SPD_MIN), 0, 1);
+    const anchorTarget =
+      inRun || s.phase === "riding"
+        ? CAM_ANCHOR_SLOW_FRAC + (CAM_ANCHOR_FAST_FRAC - CAM_ANCHOR_SLOW_FRAC) * spd
+        : CAM_ANCHOR_FRAC;
+    if (s.phase === "title" || s.phase === "ready") anchorFrac = anchorTarget;
+    else anchorFrac += (anchorTarget - anchorFrac) * (1 - Math.exp(-dt / CAM_ANCHOR_TAU_MS));
+
+    viewW = designW / zoom;
+    viewH = DESIGN_H / zoom;
+    // Road pinned relative to the BOTTOM of the view: the foreground tile
+    // (DESIGN_H tall, road-aligned) then ends exactly at the canvas bottom.
+    groundY = viewH - (DESIGN_H - GROUND_Y);
+    camAnchorX = viewW * anchorFrac;
+  };
+
   const updateCamera = (s: EngineState, dtMs: number) => {
-    const chrisWorldY = GROUND_Y - s.y * PX_PER_METER;
+    updateZoom(s, dtMs);
+    // Horizontal: up to and including the ride the engine does its own easing,
+    // so the camera pins to it exactly; from the ramp onward it chases with a
+    // smoothed velocity + position pull (see CAM_VX_TAU_MS).
+    if (
+      s.phase === "title" ||
+      s.phase === "ready" ||
+      s.phase === "charging" ||
+      s.phase === "riding"
+    ) {
+      camX = s.cameraX;
+      camVx = s.vx;
+    } else {
+      const dtS = Math.max(0, dtMs) / 1000;
+      camVx += (s.vx - camVx) * (1 - Math.exp(-Math.max(0, dtMs) / CAM_VX_TAU_MS));
+      camX += camVx * dtS;
+      camX += (s.cameraX - camX) * (1 - Math.exp(-Math.max(0, dtMs) / CAM_POS_TAU_MS));
+    }
+
+    // Vertical: aim slightly below Chris while he falls so the ground is
+    // already framed when he arrives.
+    const aimY = Math.max(s.y + Math.min(0, s.vy) * CAM_FALL_LOOKAHEAD_S, 0);
+    const chrisWorldY = groundY - aimY * PX_PER_METER;
     // Only ever pans UP (camY <= 0): the ground never rises above its resting
-    // position, and Chris is prioritised once he climbs past CHRIS_TOP_Y.
-    const target = Math.min(0, chrisWorldY - CHRIS_TOP_Y);
+    // position, and Chris is prioritised once he climbs past the top band.
+    const target = Math.min(0, chrisWorldY - viewH * CHRIS_TOP_FRAC);
     if (s.phase === "title" || s.phase === "ready") {
       camY = target;
       return;
@@ -591,9 +848,9 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
   // ── Drawing ───────────────────────────────────────────────────────────────
 
-  /** World metres -> design-space screen x. `cameraX` lands on the anchor. */
-  const worldToScreenX = (s: EngineState, worldXm: number): number =>
-    (worldXm - s.cameraX) * PX_PER_METER + camAnchorX;
+  /** World metres -> design-space screen x. The smoothed camera lands on the anchor. */
+  const worldToScreenX = (_s: EngineState, worldXm: number): number =>
+    (worldXm - camX) * PX_PER_METER + camAnchorX;
 
   /** 1 at surge start → 0 after BOOST_FX_MS; 0 when no recent pickup. */
   const boostFxT = (s: EngineState): number => {
@@ -605,6 +862,18 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       if (dt >= 0 && dt < BOOST_FX_MS) best = Math.max(best, 1 - dt / BOOST_FX_MS);
     }
     return best;
+  };
+
+  /** ms since the most recent bounce CONTACT (consumed = actually landed on),
+   *  or Infinity when none. Drives Chris's squash and the contact shake. */
+  const sinceBounceContact = (s: EngineState): number => {
+    let latest = -Infinity;
+    for (let i = 0; i < s.objects.length; i++) {
+      const o = s.objects[i];
+      if (o.kind !== "bounce" || !o.consumed || o.triggeredAtMs === null) continue;
+      if (o.triggeredAtMs > latest) latest = o.triggeredAtMs;
+    }
+    return latest === -Infinity ? Infinity : s.timeMs - latest;
   };
 
   // Smoothed streak intensity: vx changes DISCONTINUOUSLY at bounces and
@@ -626,27 +895,24 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const drawSpeedStreaks = (s: EngineState, boost: number) => {
     const inFlight = s.phase === "launching" || s.phase === "flying";
     const speedFrac = clamp((s.vx - STREAK_MIN_VX) / (STREAK_MAX_VX - STREAK_MIN_VX), 0, 1);
-    const target = inFlight ? Math.max(speedFrac * 0.7, boost) : 0;
+    const target = inFlight ? Math.max(speedFrac * 0.85, boost) : 0;
     const dtMs = clamp(s.timeMs - streakLastMs, 0, 100);
     streakLastMs = s.timeMs;
     streakLevel += (target - streakLevel) * (1 - Math.exp(-dtMs / 300));
     if (streakLevel <= 0.04) return;
 
     const level = streakLevel;
-    const camPx = s.cameraX * PX_PER_METER;
+    const camPx = camX * PX_PER_METER;
     const len = 120 + 260 * level;
     const sprite = boost > 0.15 ? streakSpriteBoost : streakSprite;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    // The sprites are smooth gradients; nearest-neighbour sampling would band
-    // them back into hard bars.
-    ctx.imageSmoothingEnabled = true;
     for (let i = 0; i < STREAK_COUNT; i++) {
       const h = hash32(i + 991);
       const lane = (h % 1000) / 1000;
-      const y = 40 + lane * (DESIGN_H - 280) - camY * 0.25;
+      const y = 40 + lane * (viewH - 280) - camY * 0.25;
       const speedMul = 1.15 + ((h >>> 10) % 40) / 100;
-      const wrapW = designW + len * 2;
+      const wrapW = viewW + len * 2;
       let x = (((h >>> 4) % wrapW) - camPx * speedMul) % wrapW;
       if (x < 0) x += wrapW;
       x -= len;
@@ -654,9 +920,13 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       const w = len * (0.55 + ((h >>> 20) % 50) / 100);
       ctx.drawImage(sprite, x, y, w, 3 + (h % 3));
     }
-    ctx.imageSmoothingEnabled = false;
     ctx.restore();
   };
+
+  // Smoothed tilt — the velocity-derived target flips sign in one frame at a
+  // bounce contact; the sprite eases through it instead of snapping.
+  let tiltCur = 0;
+  let tiltLastMs = 0;
 
   const drawChris = (s: EngineState, boost: number) => {
     const key = s.chris.key;
@@ -672,15 +942,75 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     // overlay takes over instead of vanishing mid-air.
     if (key === "death") frame = Math.min(frame, sheet.meta.frameCount - 2);
 
-    let tilt = 0;
+    let tiltTarget = 0;
     if (s.phase === "flying" || s.phase === "dying" || s.phase === "launching") {
       // Canvas y grows downward, so a climbing Chris needs a NEGATIVE rotation
       // for his nose to point up.
-      tilt = clamp(-Math.atan2(s.vy, Math.max(0.001, s.vx)), -MAX_FLIGHT_TILT_RAD, MAX_FLIGHT_TILT_RAD);
+      tiltTarget = clamp(-Math.atan2(s.vy, Math.max(0.001, s.vx)), -MAX_FLIGHT_TILT_RAD, MAX_FLIGHT_TILT_RAD);
     }
+    const tiltDt = clamp(s.timeMs - tiltLastMs, 0, 100);
+    tiltLastMs = s.timeMs;
+    tiltCur += (tiltTarget - tiltCur) * (1 - Math.exp(-tiltDt / TILT_TAU_MS));
+    const tilt = s.phase === "ready" || s.phase === "charging" ? (tiltCur = 0) : tiltCur;
 
     const x = worldToScreenX(s, s.x);
-    const y = GROUND_Y - s.y * PX_PER_METER - camY;
+    let y = groundY - s.y * PX_PER_METER - camY;
+
+    // Squash & stretch about the anchor: crushed during the bounce hit-stop,
+    // a stretch overshoot on departure, back to 1 by the end of the window.
+    // The landing touchdown gets a smaller single squash.
+    let sqX = 1;
+    let sqY = 1;
+    const bT = sinceBounceContact(s);
+    if (bT < BOUNCE_SQUASH_MS) {
+      const p = bT / BOUNCE_SQUASH_MS;
+      sqX = 1 + 0.18 * p;
+      sqY = 1 - 0.26 * p;
+      // Ride the crush down: the head under him drops by the character's
+      // squash (see the bounce case in drawObject), so he sinks with it.
+      y += p * 0.34 * TUNING.world.bounceTopM * PX_PER_METER;
+    } else if (bT < BOUNCE_FX_MS) {
+      const p = (bT - BOUNCE_SQUASH_MS) / (BOUNCE_FX_MS - BOUNCE_SQUASH_MS);
+      const k = Math.sin(Math.PI * Math.min(p * 1.35, 1)) * (1 - p * 0.55);
+      sqX = 1 - 0.1 * k;
+      sqY = 1 + 0.15 * k;
+    } else if (s.phase === "landing") {
+      const lT = s.timeMs - s.chris.startedAtMs;
+      if (lT < LAND_FX_MS) {
+        const k = Math.sin(Math.PI * (lT / LAND_FX_MS));
+        sqX = 1 + 0.08 * k;
+        sqY = 1 - 0.12 * k;
+      }
+    }
+    // Spin about the body's centre: a backflip off a head as the crush
+    // releases, or the death tumble.
+    let flip = 0;
+    if (bT >= BOUNCE_SQUASH_MS && bT < BOUNCE_SQUASH_MS + BOUNCE_FLIP_MS && s.phase === "flying") {
+      const p = (bT - BOUNCE_SQUASH_MS) / BOUNCE_FLIP_MS;
+      flip = -2 * Math.PI * (p * p * (3 - 2 * p));
+    } else if (s.phase === "dying" || (s.phase === "ended" && s.endCause !== "landed")) {
+      flip = tumble;
+    }
+    // Run-up wheelie pivots about the rear wheel.
+    const lift = s.phase === "riding" && Math.abs(wheelie) > 0.005 ? wheelie : 0;
+
+    const squashed = sqX !== 1 || sqY !== 1 || flip !== 0 || lift !== 0;
+    if (squashed) {
+      ctx.save();
+      if (lift !== 0) {
+        ctx.translate(x - WHEELIE_PIVOT_BACK, y);
+        ctx.rotate(lift);
+        ctx.translate(-(x - WHEELIE_PIVOT_BACK), -y);
+      }
+      if (flip !== 0) {
+        ctx.translate(x, y - CHRIS_FLIP_PIVOT_UP);
+        ctx.rotate(flip);
+        ctx.translate(-x, -(y - CHRIS_FLIP_PIVOT_UP));
+      }
+      ctx.translate(x, y);
+      ctx.scale(sqX, sqY);
+      ctx.translate(-x, -y);
+    }
 
     // Moonboots surge: ghost afterimages trailing back along the velocity
     // vector, strongest nearest the body. Drawn before the main sprite.
@@ -694,8 +1024,29 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     }
 
     drawSheet(ctx, sheet, anchor, x, y, frame, opts(false, tilt, 1, 1));
+    if (squashed) ctx.restore();
 
-    if (s.phase === "landing") drawDust(ctx, x, y, s.timeMs);
+    if (s.phase === "landing" && s.vx > 1) drawDust(ctx, x, y, s.timeMs, clamp(s.vx / DUST_MAX_VX, 0, 1));
+  };
+
+  /** Tire mark laid down by the skid, from touchdown to the bike's current x. */
+  const drawSkidMark = (s: EngineState) => {
+    if (skidStartX === null) return;
+    const x0 = worldToScreenX(s, skidStartX);
+    const x1 = worldToScreenX(s, s.x);
+    if (x1 - x0 < 4) return;
+    const y = groundY - camY + 3;
+    ctx.save();
+    ctx.fillStyle = "#120a26";
+    ctx.globalAlpha = SKID_MARK_ALPHA;
+    ctx.fillRect(x0, y - SKID_MARK_H / 2, x1 - x0, SKID_MARK_H);
+    // Darker core that fades in along the mark (rubber builds as he brakes).
+    const grad = ctx.createLinearGradient(x0, 0, x1, 0);
+    grad.addColorStop(0, "rgba(10, 5, 20, 0)");
+    grad.addColorStop(1, "rgba(10, 5, 20, 0.9)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(x0, y - 3, x1 - x0, 6);
+    ctx.restore();
   };
 
   /**
@@ -705,14 +1056,14 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
    * objects — those stand full-size in the near lane on a pulsing pad.
    */
   const drawCrowd = (s: EngineState) => {
-    const laneY = GROUND_Y - BYSTANDER_LANE_RAISE - camY;
+    const laneY = groundY - BYSTANDER_LANE_RAISE - camY;
 
     // Start-line spectators watching the launch from behind Chris; the first
     // slot is the animated viz dancer, the rest are static meebits.
     const viz = sheets.viz;
     for (let i = 0; i < SPECTATOR_XS.length; i++) {
       const x = worldToScreenX(s, SPECTATOR_XS[i]);
-      if (x < -300 || x > designW + 300) continue;
+      if (x < -300 || x > viewW + 300) continue;
       if (i === 0 && viz) {
         drawSheet(ctx, viz, SPECTATOR_VIZ_ANCHOR, x, laneY, frameIndexAt(viz.meta, s.timeMs));
         continue;
@@ -740,8 +1091,8 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     //              playing the profile walk that faces their travel direction
     //   6–7 (20%)  idle facing the road (front)
     //   8–9 (20%)  dancing (the viz sheet — the one bespoke action asset)
-    const leftM = s.cameraX - camAnchorX / PX_PER_METER;
-    const rightM = leftM + designW / PX_PER_METER;
+    const leftM = camX - camAnchorX / PX_PER_METER;
+    const rightM = leftM + viewW / PX_PER_METER;
     const k0 = Math.max(1, Math.floor(leftM / BYSTANDER_SPACING_M) - 1);
     const k1 = Math.ceil(rightM / BYSTANDER_SPACING_M) + 1;
     for (let k = k0; k <= k1; k++) {
@@ -769,7 +1120,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       }
       if (Math.abs(xm - TUNING.rampX) < 80) continue; // keep the ramp art clear
       const sx = worldToScreenX(s, xm);
-      if (sx < -300 || sx > designW + 300) continue;
+      if (sx < -300 || sx > viewW + 300) continue;
 
       if (bucket >= 8) {
         // Dancer — the animated viz meebit at background scale, desynced.
@@ -796,8 +1147,8 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
   const drawObject = (s: EngineState, obj: WorldObjectState) => {
     const x = worldToScreenX(s, obj.x);
-    if (x < -designW * CULL_SCREENS || x > designW * (1 + CULL_SCREENS)) return;
-    const groundY = GROUND_Y - camY;
+    if (x < -viewW * CULL_SCREENS || x > viewW * (1 + CULL_SCREENS)) return;
+    const gy = groundY - camY;
 
     switch (obj.kind) {
       case "skeleton": {
@@ -808,7 +1159,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         // once from triggeredAtMs and clamps on its last frame.
         const elapsed = obj.triggeredAtMs === null ? 0 : s.timeMs - obj.triggeredAtMs;
         const skelFrame = frameIndexAt(sheet.meta, elapsed);
-        drawSheet(ctx, sheet, SKELETON_ANCHOR, x, groundY, skelFrame);
+        drawSheet(ctx, sheet, SKELETON_ANCHOR, x, gy, skelFrame);
         // Both throws ship the bone as a separate sequence on the SAME 1920×1080
         // source canvas, so the identical anchor composites it exactly as
         // authored — but the bone sheet only covers a window of the clip, so it
@@ -817,44 +1168,73 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         if (bone && obj.triggeredAtMs !== null) {
           const boneFrame = skelFrame - (BONE_FRAME_OFFSET[obj.variant] ?? 0);
           if (boneFrame >= 0 && boneFrame < bone.meta.frameCount) {
-            drawSheet(ctx, bone, SKELETON_ANCHOR, x, groundY, boneFrame);
+            drawSheet(ctx, bone, SKELETON_ANCHOR, x, gy, boneFrame);
           }
         }
         return;
       }
       case "bounce": {
-        // Brief pop on contact so the bounce reads without bespoke art.
-        let pop = 1;
-        if (obj.triggeredAtMs !== null) {
-          const t = (s.timeMs - obj.triggeredAtMs) / 220;
-          if (t >= 0 && t < 1) pop = 1 + 0.12 * Math.sin(t * Math.PI);
+        // The character takes the hit: crushed about the feet while Chris is
+        // on their head (the hit-stop window), then a springy over-stretch
+        // that settles — a bounce off a body, not a mid-air course change.
+        let sqX = 1;
+        let sqY = 1;
+        if (obj.consumed && obj.triggeredAtMs !== null) {
+          const t = s.timeMs - obj.triggeredAtMs;
+          if (t < BOUNCE_SQUASH_MS) {
+            const p = t / BOUNCE_SQUASH_MS;
+            sqX = 1 + 0.28 * p;
+            sqY = 1 - 0.34 * p;
+          } else if (t < BOUNCE_FX_MS) {
+            const p = (t - BOUNCE_SQUASH_MS) / (BOUNCE_FX_MS - BOUNCE_SQUASH_MS);
+            const kk = Math.sin(Math.PI * Math.min(p * 1.35, 1)) * (1 - p * 0.55);
+            sqX = 1 - 0.12 * kk;
+            sqY = 1 + 0.2 * kk;
+          }
         }
-        drawBouncePad(ctx, x, groundY, s.timeMs + obj.id * 271);
+        // Rock back on the heels (canvas-clockwise = top leans forward with
+        // Chris's travel), damped out over the wobble window.
+        let lean = 0;
+        const hitT = obj.consumed && obj.triggeredAtMs !== null ? s.timeMs - obj.triggeredAtMs : Infinity;
+        if (hitT < BOUNCE_WOBBLE_MS) {
+          lean = 0.26 * Math.sin(hitT / 52) * Math.exp(-hitT / 190);
+        }
+        drawBouncePad(ctx, x, gy, s.timeMs + obj.id * 271);
+        const squashed = sqX !== 1 || sqY !== 1 || lean !== 0;
+        if (squashed) {
+          ctx.save();
+          ctx.translate(x, gy);
+          ctx.rotate(lean);
+          ctx.scale(sqX, sqY);
+          ctx.translate(-x, -gy);
+        }
         // Variant 1 is the animated viz dancer; variant 2 a static meebit
         // (picked per object id, so the character is stable). Either falls
         // back to the other if its art is missing.
         const meebitImg = images[meebitKeyFor(obj.id)];
         const vizSheet = sheets[BOUNCE_SHEET];
         if ((obj.variant === 2 && meebitImg) || !vizSheet) {
-          if (!meebitImg) return;
-          drawMeebit(ctx, meebitImg, x, groundY, MEEBIT_H, s.timeMs, obj.id, pop);
-          return;
+          if (meebitImg) drawMeebit(ctx, meebitImg, x, gy, MEEBIT_H, s.timeMs, obj.id);
+        } else {
+          drawSheet(
+            ctx,
+            vizSheet,
+            BOUNCE_ANCHOR,
+            x,
+            gy,
+            frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
+          );
         }
-        drawSheet(
-          ctx,
-          vizSheet,
-          BOUNCE_ANCHOR,
-          x,
-          groundY,
-          frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
-          opts(false, 0, 1, pop),
-        );
+        if (squashed) ctx.restore();
+        if (hitT < BOUNCE_BURST_MS) {
+          drawImpactBurst(ctx, x, gy - TUNING.world.bounceTopM * PX_PER_METER, hitT / BOUNCE_BURST_MS);
+        }
         return;
       }
       case "blocker": {
         const sheet = sheets[BLOCKER_SHEET];
         if (!sheet) return;
-        drawSheet(ctx, sheet, BLOCKER_ANCHOR, x, groundY, frameIndexAt(sheet.meta, s.timeMs));
+        drawSheet(ctx, sheet, BLOCKER_ANCHOR, x, gy, frameIndexAt(sheet.meta, s.timeMs));
         return;
       }
       case "moonboots": {
@@ -863,7 +1243,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         if (!sheet) return;
         const bob = Math.sin(s.timeMs / 380 + obj.id) * 12;
         const altM = obj.y ?? MOONBOOTS_ALT_M;
-        const y = GROUND_Y - altM * PX_PER_METER - camY + bob;
+        const y = groundY - altM * PX_PER_METER - camY + bob;
         drawSheet(ctx, sheet, MOONBOOTS_ANCHOR, x, y, frameIndexAt(sheet.meta, s.timeMs));
         return;
       }
@@ -879,7 +1259,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
           obj.triggeredAtMs === null
             ? Math.floor(((s.timeMs + obj.id * 313) / 1000) * sheet.meta.fps) % ROBOT_IDLE_FRAMES
             : frameIndexAt(sheet.meta, s.timeMs - obj.triggeredAtMs);
-        drawSheet(ctx, sheet, ROBOT_ANCHOR, x, groundY, frame);
+        drawSheet(ctx, sheet, ROBOT_ANCHOR, x, gy, frame);
         return;
       }
       default:
@@ -909,15 +1289,15 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       if (elapsed < 0 || elapsed > LASER_FLASH_MS) continue;
 
       const rx = worldToScreenX(s, obj.x);
-      if (rx < -designW * CULL_SCREENS || rx > designW * (1 + CULL_SCREENS)) continue;
+      if (rx < -viewW * CULL_SCREENS || rx > viewW * (1 + CULL_SCREENS)) continue;
       // Beam origin: the robot's opened visor (falls back to off-screen
       // bottom if the sheet failed to load — the pillar still reads).
       const ox = robotMeta
         ? rx + (ROBOT_EYE_AX - ROBOT_ANCHOR.ax) * robotMeta.srcCanvasW * ROBOT_ANCHOR.scale
         : rx;
       const oy = robotMeta
-        ? GROUND_Y - camY - (ROBOT_ANCHOR.ay - ROBOT_EYE_AY) * robotMeta.srcCanvasH * ROBOT_ANCHOR.scale
-        : DESIGN_H + 80;
+        ? groundY - camY - (ROBOT_ANCHOR.ay - ROBOT_EYE_AY) * robotMeta.srcCanvasH * ROBOT_ANCHOR.scale
+        : viewH + 80;
 
       // The beam is a vertical skyward PILLAR, matching the fire pose (the
       // head tips fully back; an angled bolt from that pose reads wrong —
@@ -936,32 +1316,53 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     if (!sheet) return;
     const peak = Math.min(POWER_METER_PEAK_FRAME, sheet.meta.frameCount - 1);
     const frame = Math.round(clamp(s.powerFrac, 0, 1) * peak);
-    drawSheet(ctx, sheet, POWER_METER_ANCHOR, designW / 2, POWER_METER_Y, frame);
+    drawSheet(ctx, sheet, POWER_METER_ANCHOR, viewW / 2, groundY + (POWER_METER_Y - GROUND_Y), frame);
   };
 
   const draw = (s: EngineState) => {
     // Clear the whole backing store (including any 1px letterbox rounding)
-    // in device space, then return to the design-space transform.
-    ctx.save();
+    // in device space, then set this frame's zoomed view transform.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
+    const vz = viewScale * zoom;
+    ctx.setTransform(vz, 0, 0, vz, viewOffsetX, viewOffsetY);
 
-    // Moonboots surge: the whole scene judders while the FX window decays.
+    // Screen shake: moonboots surge, bounce contacts and the touchdown all
+    // judder the scene; the strongest active source wins.
     const boost = boostFxT(s);
+    let shakeAmp = 6 * boost;
+    const bT = sinceBounceContact(s);
+    if (bT < BOUNCE_SHAKE_MS) shakeAmp = Math.max(shakeAmp, 11 * (1 - bT / BOUNCE_SHAKE_MS));
+    if (s.phase === "landing") {
+      const lT = s.timeMs - s.chris.startedAtMs;
+      if (lT < LAND_FX_MS) shakeAmp = Math.max(shakeAmp, 8 * (1 - lT / LAND_FX_MS));
+    }
+    const thudT = s.timeMs - thudMs;
+    if (thudT < THUD_SHAKE_MS) shakeAmp = Math.max(shakeAmp, 9 * (1 - thudT / THUD_SHAKE_MS));
     ctx.save();
-    if (boost > 0) {
-      const amp = 6 * boost;
-      ctx.translate(Math.sin(s.timeMs * 0.09) * amp, Math.cos(s.timeMs * 0.13) * amp * 0.6);
+    if (shakeAmp > 0.1) {
+      // Slight scale-up about the view centre so the shake's translate never
+      // exposes the clear colour at the canvas edges.
+      const cover = 1 + (2.2 * shakeAmp) / viewW;
+      ctx.translate(viewW / 2, viewH / 2);
+      ctx.scale(cover, cover);
+      ctx.translate(-viewW / 2, -viewH / 2);
+      ctx.translate(
+        Math.sin(s.timeMs * 0.09) * shakeAmp,
+        Math.cos(s.timeMs * 0.13) * shakeAmp * 0.6,
+      );
     }
 
-    paintSky(ctx, sky, -camY, designW, DESIGN_H);
+    // Layers are DESIGN_H tall and road-aligned; shifting them down by the
+    // zoom's extra view height keeps their bottom edge on the canvas bottom.
+    const layerShift = viewH - DESIGN_H;
+    paintSky(ctx, sky, layerShift - camY, viewW, viewH);
 
-    const cameraPx = s.cameraX * PX_PER_METER - camAnchorX;
-    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY, designW, DESIGN_H);
-    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY, designW, DESIGN_H);
-    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY, designW, DESIGN_H);
+    const cameraPx = camX * PX_PER_METER - camAnchorX;
+    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY - layerShift, viewW, DESIGN_H);
+    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY - layerShift, viewW, DESIGN_H);
+    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY - layerShift, viewW, DESIGN_H);
 
     drawCrowd(s);
 
@@ -970,17 +1371,34 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const rampSheet = sheets.rampUfo;
     if (rampSheet) {
       const rx = worldToScreenX(s, TUNING.rampX);
-      if (rx > -designW * CULL_SCREENS && rx < designW * (1 + CULL_SCREENS)) {
-        drawSheet(ctx, rampSheet, RAMP_ANCHOR, rx, GROUND_Y - camY, frameIndexAt(rampSheet.meta, s.timeMs));
+      if (rx > -viewW * CULL_SCREENS && rx < viewW * (1 + CULL_SCREENS)) {
+        drawSheet(ctx, rampSheet, RAMP_ANCHOR, rx, groundY - camY, frameIndexAt(rampSheet.meta, s.timeMs));
       }
     }
 
     for (let i = 0; i < s.objects.length; i++) drawObject(s, s.objects[i]);
 
+    drawSkidMark(s);
     drawSpeedStreaks(s, boost);
     drawChris(s, boost);
 
-    drawLasers(s, worldToScreenX(s, s.x), GROUND_Y - s.y * PX_PER_METER - camY);
+    // One-shot bursts: wheels leaving the lip, the dead body hitting the road.
+    const lipT = s.timeMs - lipMs;
+    if (lipT < LIP_BURST_MS) {
+      drawImpactBurst(
+        ctx,
+        worldToScreenX(s, TUNING.rampX + TUNING.ride.rampLengthM),
+        groundY - TUNING.ride.rampHeightM * PX_PER_METER - camY,
+        lipT / LIP_BURST_MS,
+        LIP_BURST_COLOR,
+        false,
+      );
+    }
+    if (thudT < THUD_BURST_MS) {
+      drawImpactBurst(ctx, worldToScreenX(s, s.x), groundY - camY, thudT / THUD_BURST_MS, THUD_BURST_COLOR, false);
+    }
+
+    drawLasers(s, worldToScreenX(s, s.x), groundY - s.y * PX_PER_METER - camY);
     drawPowerMeter(s);
     ctx.restore();
   };
@@ -992,9 +1410,11 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const frame = (now: number) => {
     if (disposed) return;
     raf = requestAnimationFrame(frame);
-    const dt = lastNow === 0 ? 16.7 : Math.min(100, now - lastNow);
-    lastNow = now;
     const s = engine.tick(now);
+    // Camera and FX run on ENGINE time so impact slow-motion dilates them
+    // in step with the world instead of racing ahead of a slowed Chris.
+    const dt = lastNow === 0 ? 16.7 : clamp(s.timeMs - lastNow, 0, 100);
+    lastNow = s.timeMs;
     updateCamera(s, dt);
     draw(s);
   };
@@ -1074,16 +1494,58 @@ function drawLaserPillar(
   ctx.restore();
 }
 
-/** Tiny deterministic dust squares kicked up behind a landing slide. */
-function drawDust(ctx: CanvasRenderingContext2D, x: number, y: number, timeMs: number): void {
+/**
+ * Impact burst at a bounce contact: an expanding additive ring plus a fan of
+ * sparks thrown up and forward. `p` runs 0→1 over BOUNCE_BURST_MS.
+ */
+function drawImpactBurst(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  p: number,
+  color = "#9ff5ea",
+  ring = true,
+): void {
+  const fade = 1 - p;
+  const ease = 1 - (1 - p) * (1 - p);
   ctx.save();
-  ctx.fillStyle = "#9aa2d4";
-  for (let i = 0; i < 6; i++) {
+  ctx.globalCompositeOperation = "lighter";
+  if (ring) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 10 * fade + 2;
+    ctx.globalAlpha = 0.7 * fade;
+    ctx.beginPath();
+    ctx.ellipse(x, y, BOUNCE_BURST_R * ease, BOUNCE_BURST_R * 0.55 * ease, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = ring ? "#ffffff" : color;
+  for (let i = 0; i < 9; i++) {
+    const h = hash32(i + 77);
+    const ang = -Math.PI * (0.15 + ((h % 1000) / 1000) * 0.9); // fan across the upper half
+    const speed = 160 + ((h >>> 10) % 160);
+    const sx = x + Math.cos(ang) * speed * ease + 60 * ease; // carried forward with Chris
+    const sy = y + Math.sin(ang) * speed * ease + 220 * p * p; // and pulled back down
+    const size = 4 + ((h >>> 20) % 8) * fade;
+    ctx.globalAlpha = 0.9 * fade;
+    ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+  }
+  ctx.restore();
+}
+
+/** Deterministic dust plume kicked up behind a landing slide; `strength`
+ *  (0..1, from speed) scales the count, throw and size. */
+function drawDust(ctx: CanvasRenderingContext2D, x: number, y: number, timeMs: number, strength: number): void {
+  const n = 6 + Math.round(12 * strength);
+  const throwPx = 140 + 220 * strength;
+  const rise = 44 + 90 * strength;
+  ctx.save();
+  ctx.fillStyle = "#c3c8ee";
+  for (let i = 0; i < n; i++) {
     const ph = ((timeMs * 0.0042 + i * 0.37) % 1 + 1) % 1;
-    const px = x - 26 - ph * 140 - i * 7;
-    const py = y - ph * 44 - (i % 3) * 9;
-    const size = 6 + ph * 16;
-    ctx.globalAlpha = 0.42 * (1 - ph);
+    const px = x - 26 - ph * throwPx - i * 7;
+    const py = y - ph * rise - (i % 3) * 9 - (hash32(i) % 30) * strength;
+    const size = (8 + ph * 20) * (1 + 0.8 * strength);
+    ctx.globalAlpha = (0.55 + 0.25 * strength) * (1 - ph);
     ctx.fillRect(px - size / 2, py - size, size, size);
   }
   ctx.restore();

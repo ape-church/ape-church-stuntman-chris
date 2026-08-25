@@ -63,7 +63,7 @@ export function generateFlightPlan(rng: Rng, power: number): FlightPlan {
   // Bounce count: random, but floored by distance. Every bounce is an extra
   // arc, and arcs are time-capped — without this floor a 3000 m run would have
   // to be covered by one absurdly fast arc.
-  const bounceFloor = clamp(Math.ceil(baseDist / P.metersPerBounceHint) - 1, 0, 3);
+  const bounceFloor = clamp(Math.ceil(baseDist / P.metersPerBounceHint) - 1, 0, P.bounceMaxCount);
   let bounceCount = Math.max(pickWeighted(rng, P.bounceCountWeights), bounceFloor);
   if (baseDist < P.bounceMinDistanceM) bounceCount = 0;
 
@@ -115,8 +115,26 @@ export function generateFlightPlan(rng: Rng, power: number): FlightPlan {
   // be flown stupidly fast.
   const bStart = firstX;
   const corridor = finalDistance * P.bounceMaxFrac - bStart;
+  // Spacing scales with the run's arc speed so every arc off a head is a
+  // real flight (see bounceMinSpanS); the final approach must clear it too.
+  const spacing = Math.max(
+    P.bounceMinSpacingM,
+    lerp(TUNING.arc.vxTargetMin, TUNING.arc.vxTargetMax, s) * P.bounceMinSpanS,
+  );
   if (finalDistance >= P.bounceMinDistanceM && bounceCount > 0) {
-    const n = Math.min(bounceCount, Math.max(0, Math.floor(corridor / P.bounceMinSpacingM) - 1));
+    // n bounces sit at slots 1..n of n+1 across the corridor. Shed bounces
+    // until every span AFTER a head (bounce→bounce and last bounce→finish)
+    // is at least `spacing`; the first span off the ramp only needs minSpan.
+    let n = Math.min(bounceCount, P.bounceMaxCount);
+    while (
+      n > 0 &&
+      !(
+        (n < 2 || corridor / (n + 1) >= spacing) &&
+        finalDistance - bStart - (corridor * n) / (n + 1) >= spacing
+      )
+    ) {
+      n--;
+    }
     for (let i = 0; i < n; i++) {
       const slot = (i + 1 + rangeOf(rng, -P.bounceJitter, P.bounceJitter)) / (n + 1);
       kept.push({

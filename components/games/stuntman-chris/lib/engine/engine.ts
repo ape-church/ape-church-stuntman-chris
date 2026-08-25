@@ -35,6 +35,12 @@
  * rate did. Correction is therefore never a visible jump — it lives entirely
  * in the (constant, per-arc) choice of vx0.
  *
+ * An arc OFF a bounce head is the one arc not shaped from scratch: its
+ * vertical launch is the arrival vy reflected (× restitution) and the
+ * horizontal speed is held within a band of the arrival vx, re-timing with
+ * lift when the two conflict — so a bounce reads as momentum carried through
+ * a springy body rather than a fresh launch (see solveBounceArc).
+ *
  * Two events perturb an arc mid-flight and are handled by RE-SOLVING rather
  * than by nudging:
  *   • moonboots — a short boosted segment (higher vx, upward kick), after
@@ -176,6 +182,8 @@ class Engine implements StuntEngine {
   private deathVx0 = 0;
   private deathVy0 = 0;
   private deathGroundedAtMs: number | null = null;
+  /** Engine ms of the last bounce contact; drives the impact slow-mo. */
+  private lastBounceMs = -Infinity;
 
   constructor(provider: FlightPlanProvider) {
     this.provider = provider;
@@ -211,6 +219,7 @@ class Engine implements StuntEngine {
     // A tab-hidden gap must not fast-forward the run; the engine clock simply
     // loses that time (it is a presentation clock, not wall time).
     dt = Math.min(dt, TUNING.loop.maxFrameMs);
+    dt *= this.timeScale();
 
     while (dt > 1e-6) {
       const step = Math.min(dt, TUNING.loop.maxStepMs);
@@ -218,6 +227,14 @@ class Engine implements StuntEngine {
       dt -= step;
     }
     return this.s;
+  }
+
+  /** Impact slow-motion (bounce contact / lethal hit), else 1. */
+  private timeScale(): number {
+    const t = this.s.timeMs;
+    if (t - this.lastBounceMs < TUNING.bounce.slowMoMs) return TUNING.bounce.slowMoScale;
+    if (this.s.phase === "dying" && t - this.deathT0 < TUNING.death.slowMoMs) return TUNING.death.slowMoScale;
+    return 1;
   }
 
   begin(): void {
@@ -337,6 +354,7 @@ class Engine implements StuntEngine {
     this.holdMs = 0;
     this.landStoppedAtMs = null;
     this.deathGroundedAtMs = null;
+    this.lastBounceMs = -Infinity;
     this.updateCamera();
   }
 
@@ -383,10 +401,20 @@ class Engine implements StuntEngine {
       this.setAnim("riding");
     }
 
-    let nx = this.s.x + this.rideSpeed * dt;
     if (!this.s.plan) {
       // Outcome still resolving: park short of the ramp rather than launch
       // blind. Bounded, so a dead provider degrades instead of freezing.
+      // Speed is capped by what 2x-accel braking can shed before the hold
+      // point, so the approach eases down instead of slamming from top speed
+      // to a crawl the frame the hold engages.
+      const holdX = TUNING.rampX - TUNING.ride.holdMarginM;
+      const brake = TUNING.ride.accel * 2;
+      const dist = Math.max(holdX - this.s.x, 0);
+      const vCap = Math.sqrt(TUNING.ride.holdSpeed * TUNING.ride.holdSpeed + 2 * brake * dist);
+      this.rideSpeed = Math.min(this.rideSpeed, vCap);
+    }
+    let nx = this.s.x + this.rideSpeed * dt;
+    if (!this.s.plan) {
       const holdX = TUNING.rampX - TUNING.ride.holdMarginM;
       if (nx > holdX) {
         nx = holdX;
@@ -578,8 +606,17 @@ class Engine implements StuntEngine {
     const span = Math.max(target.x - x0, 1e-3);
 
     // Two independent lids on the climb: this run's power budget (looks) and
-    // the absolute frame ceiling (the renderer's hard constraint).
-    const vyMax = Math.min(vyCeilingAt(y0), Math.sqrt(2 * g * this.apexBudget));
+    // the absolute frame ceiling (the renderer's hard constraint). The budget
+    // lid is a look, not a contract — an arc must still be able to REACH a
+    // raised target (the bounce deck) from a low launch, or the clamp hands
+    // back a trajectory that peaks below the deck and the contact snap
+    // teleports Chris up onto it. The reach floor guarantees the arc arrives
+    // with a few metres of apex clearance; the absolute ceiling still wins.
+    const vyReach = target.y > y0 ? Math.sqrt(2 * g * (target.y - y0 + 4)) : 0;
+    const vyMax = Math.min(
+      Math.max(Math.sqrt(2 * g * this.apexBudget), vyReach),
+      vyCeilingAt(y0),
+    );
     let T = clamp(span / Math.max(this.vxTarget, 1), A.minT, A.maxT);
     let vy0 = vyForDuration(y0, target.y, T, g);
     if (vy0 > vyMax || vy0 < A.minVy) {
@@ -590,6 +627,47 @@ class Engine implements StuntEngine {
     }
     const vx0 = vxForSpan(span, k, T);
     return { t0, x0, y0, vx0, vy0, durS: T, onEnd: "contact" };
+  }
+
+  /**
+   * Arc off a bounce head (see TUNING.bounce). Vertical = reflected arrival;
+   * horizontal = whatever covers the span in that time, held within a band
+   * of the arrival vx by re-timing the arc with more or less lift. Arrives
+   * exactly on the target like every other arc.
+   */
+  private solveBounceArc(
+    t0: number,
+    x0: number,
+    y0: number,
+    vxIn: number,
+    vyIn: number,
+    target: ArcTarget,
+  ): Arc {
+    const { gravity: g, airDragK: k } = TUNING.world;
+    const B = TUNING.bounce;
+    const span = Math.max(target.x - x0, 1e-3);
+    const vxRef = Math.max(vxIn, 1);
+    const vyCap = vyCeilingAt(y0);
+    // Must still reach a raised target (same guard as solveFreshArc), and
+    // must visibly climb off the head (bounce.minRiseM).
+    const vyFloor = Math.max(
+      TUNING.arc.minVy,
+      Math.sqrt(2 * g * B.minRiseM),
+      target.y > y0 ? Math.sqrt(2 * g * (target.y - y0 + 4)) : 0,
+    );
+
+    let vy0 = clamp(Math.abs(vyIn) * B.restitution, vyFloor, vyCap);
+    let T = fallTime(y0, target.y, vy0, g);
+
+    const tFast = span / (vxRef * B.vxGainMax); // shortest arc the band allows
+    const tSlow = span / (vxRef * B.vxLossMax); // longest arc the band allows
+    if (T < tFast || T > tSlow) {
+      const tWant = T < tFast ? tFast : tSlow;
+      vy0 = clamp(vyForDuration(y0, target.y, tWant, g), vyFloor, vyCap);
+      T = fallTime(y0, target.y, vy0, g);
+    }
+    const vx0 = vxForSpan(span, k, Math.max(T, 1e-3));
+    return { t0, x0, y0, vx0, vy0, durS: Math.max(T, 1e-3), onEnd: "contact" };
   }
 
   /**
@@ -652,6 +730,14 @@ class Engine implements StuntEngine {
     while (this.arc && guard++ < 8) {
       const arc = this.arc;
       const tau = (this.s.timeMs - arc.t0) / 1000;
+      if (tau < 0) {
+        // Bounce hit-stop: the next arc's t0 sits in the future; hold the
+        // contact pose until it starts.
+        this.evalArc(arc, 0);
+        this.s.vx = 0;
+        this.s.vy = 0;
+        break;
+      }
       if (tau < arc.durS) {
         this.evalArc(arc, tau);
         break;
@@ -680,9 +766,16 @@ class Engine implements StuntEngine {
       if (target.kind === "bounce") {
         const obj = target.eventId === null ? undefined : this.s.objects.find((o) => o.id === target.eventId);
         if (obj) obj.consumed = true;
+        this.lastBounceMs = endMs;
         this.targetIdx++;
         const next = this.targets[this.targetIdx];
-        this.arc = next ? this.solveFreshArc(endMs, this.s.x, this.s.y, next) : null;
+        // Next arc starts after the hit-stop; the loop head holds the contact
+        // pose for the gap. evalArc(durS) above left the ARRIVAL velocity in
+        // s.vx/vy — the bounce is solved off that, not from scratch.
+        const departMs = endMs + TUNING.events.bounceHitStopMs;
+        this.arc = next
+          ? this.solveBounceArc(departMs, this.s.x, this.s.y, this.s.vx, this.s.vy, next)
+          : null;
         if (this.arc && next) this.annotateAirborneObjects(this.arc, next.x);
         continue;
       }

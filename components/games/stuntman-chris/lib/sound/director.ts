@@ -18,6 +18,18 @@ const BONE_RELEASE_MS = 1050;
 const WIND_MIN_VX = 30;
 const WIND_MAX_VX = 130;
 
+/** Speed band (m/s) that scales impact sounds — bounce pitch/volume, the
+ *  touchdown hit and the skid loop. Matches the arc speed band. */
+const IMPACT_MIN_VX = 80;
+const IMPACT_MAX_VX = 240;
+/** Engine ms after a bounce contact that the backflip whoosh fires (the
+ *  renderer starts the flip as the crush releases — see BOUNCE_SQUASH_MS). */
+const FLIP_WHOOSH_DELAY_MS = 60;
+/** Engine-ride loop pitch follows ground speed across this band. */
+const RIDE_RATE_MIN = 0.85;
+const RIDE_RATE_MAX = 1.6;
+const RIDE_MAX_VX = 200;
+
 /** Flight wind is muted for now — the current recording isn't landing. Flip
  *  this back on when a replacement flight_wind.wav is dropped in. */
 const WIND_ENABLED = false;
@@ -34,10 +46,12 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
   const triggered = new Set<number>();
   const consumed = new Set<number>();
   let pendingBones: number[] = [];
+  let pendingWhoosh: number[] = [];
   /** Miss-laser shots due at trigger + the robot clip's wind-up (see below). */
   let pendingLasers: { at: number }[] = [];
 
   const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+  const impact = (vx: number) => clamp01((vx - IMPACT_MIN_VX) / (IMPACT_MAX_VX - IMPACT_MIN_VX));
 
   /** Stop the run-scoped loops, leaving persistent ambience (crowd) alone. */
   const stopRunLoops = (): void => {
@@ -68,7 +82,7 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
         break;
       case "launching":
         sfx.stopLoop("engine_ride", 60);
-        sfx.play("ramp_launch");
+        sfx.play("ramp_launch", { volume: 0.6 + 0.4 * clamp01(s.plan?.power ?? s.powerFrac) });
         break;
       case "flying":
         if (WIND_ENABLED) sfx.loop("flight_wind", { volume: 0 });
@@ -87,11 +101,13 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
         else sfx.play("crash_blocker"); // producer file — silent until delivered
         thudded = s.y <= 0.001;
         break;
-      case "landing":
+      case "landing": {
         sfx.stopLoop("flight_wind", 80);
-        sfx.play("landing_touchdown");
-        sfx.loop("skid_loop", { volume: 0.55 });
+        const k = impact(s.vx);
+        sfx.play("landing_touchdown", { volume: 0.7 + 0.3 * k, rate: 1.05 - 0.15 * k });
+        sfx.loop("skid_loop", { volume: 0.35 + 0.4 * k, rate: 0.9 + 0.3 * k });
         break;
+      }
       case "ended":
         stopRunLoops();
         sfx.stopLoop("engine_idle");
@@ -118,6 +134,11 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
         "flight_wind",
         0.55 * clamp01((s.vx - WIND_MIN_VX) / (WIND_MAX_VX - WIND_MIN_VX)),
       );
+    }
+
+    // Engine revs with ground speed on the run-up.
+    if (s.phase === "riding") {
+      sfx.setLoopRate("engine_ride", RIDE_RATE_MIN + (RIDE_RATE_MAX - RIDE_RATE_MIN) * clamp01(s.vx / RIDE_MAX_VX));
     }
 
     // Skid fades out as the slide runs down; kill it once stopped.
@@ -157,7 +178,12 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
       }
       if (o.consumed && !consumed.has(o.id)) {
         consumed.add(o.id);
-        if (o.kind === "bounce") sfx.play("bounce");
+        if (o.kind === "bounce") {
+          // Harder hits land lower and louder; the flip whoosh follows.
+          const k = impact(s.vx);
+          sfx.play("bounce", { volume: 0.7 + 0.3 * k, rate: 1.1 - 0.25 * k });
+          pendingWhoosh.push(s.timeMs + FLIP_WHOOSH_DELAY_MS);
+        }
       }
     }
 
@@ -167,6 +193,12 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
       const due = pendingBones.filter((t) => s.timeMs >= t);
       pendingBones = pendingBones.filter((t) => s.timeMs < t);
       for (let i = 0; i < due.length; i++) sfx.play("bone_throw", { volume: 0.7 });
+    }
+
+    if (pendingWhoosh.length > 0 && s.timeMs >= pendingWhoosh[0]) {
+      const due = pendingWhoosh.filter((t) => s.timeMs >= t);
+      pendingWhoosh = pendingWhoosh.filter((t) => s.timeMs < t);
+      for (let i = 0; i < due.length; i++) sfx.whoosh({ volume: 0.45, rate: 1.1 });
     }
 
     // Miss-laser shot at the robot clip's fire flare (engine clock, like
@@ -184,6 +216,7 @@ export function createSoundDirector(engine: StuntEngine): SoundDirector {
       consumed.clear();
       pendingBones = [];
       pendingLasers = [];
+      pendingWhoosh = [];
     }
   };
 
