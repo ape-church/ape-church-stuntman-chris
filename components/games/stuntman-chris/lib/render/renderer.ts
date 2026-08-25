@@ -1116,6 +1116,12 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     }
     ctx.save();
     if (shakeAmp > 0.1) {
+      // Slight scale-up about the view centre so the shake's translate never
+      // exposes the clear colour at the canvas edges.
+      const cover = 1 + (2.2 * shakeAmp) / viewW;
+      ctx.translate(viewW / 2, viewH / 2);
+      ctx.scale(cover, cover);
+      ctx.translate(-viewW / 2, -viewH / 2);
       ctx.translate(
         Math.sin(s.timeMs * 0.09) * shakeAmp,
         Math.cos(s.timeMs * 0.13) * shakeAmp * 0.6,
