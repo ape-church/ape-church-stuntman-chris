@@ -73,6 +73,24 @@ const MAX_DESIGN_W = 2600;
 /** Camera pans up once Chris climbs above this screen y. */
 const CHRIS_TOP_Y = DESIGN_H * 0.28;
 const CAM_SMOOTH_TAU_MS = 150;
+/**
+ * Horizontal camera smoothing. The engine's cameraX tracks Chris exactly, but
+ * his vx steps discontinuously at every bounce contact and mid-air re-solve —
+ * hard-locking the camera to it turned each step into a full-screen jerk. The
+ * camera instead integrates a smoothed velocity (vx steps spread over ~120ms)
+ * with a gentle position pull toward the true cameraX, so steady-state
+ * tracking stays exact (no drift off the anchor at 150+ m/s) while the jumps
+ * are invisible.
+ */
+const CAM_VX_TAU_MS = 120;
+const CAM_POS_TAU_MS = 250;
+/** Chris's flight tilt chases its velocity-derived target over this window —
+ *  raw tilt flips sign in a single frame at a bounce contact. */
+const TILT_TAU_MS = 90;
+/** s — during a descent the vertical camera aims this far ahead of Chris's
+ *  fall so a steep drop doesn't leave him pinned at the bottom of the frame
+ *  while the camera catches up. */
+const CAM_FALL_LOOKAHEAD_S = 0.15;
 
 const PARALLAX_BG = 0.1;
 const PARALLAX_MID = 0.35;
@@ -572,12 +590,35 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const ro = new ResizeObserver(() => applySize());
   ro.observe(container);
 
-  // ── Camera (presentation-only; horizontal comes straight from the engine) ──
+  // ── Camera (presentation-only smoothing over the engine's camera) ─────────
   let camY = 0;
+  let camX = 0;
+  let camVx = 0;
   let lastNow = 0;
 
   const updateCamera = (s: EngineState, dtMs: number) => {
-    const chrisWorldY = GROUND_Y - s.y * PX_PER_METER;
+    // Horizontal: up to and including the ride the engine does its own easing,
+    // so the camera pins to it exactly; from the ramp onward it chases with a
+    // smoothed velocity + position pull (see CAM_VX_TAU_MS).
+    if (
+      s.phase === "title" ||
+      s.phase === "ready" ||
+      s.phase === "charging" ||
+      s.phase === "riding"
+    ) {
+      camX = s.cameraX;
+      camVx = s.vx;
+    } else {
+      const dtS = Math.max(0, dtMs) / 1000;
+      camVx += (s.vx - camVx) * (1 - Math.exp(-Math.max(0, dtMs) / CAM_VX_TAU_MS));
+      camX += camVx * dtS;
+      camX += (s.cameraX - camX) * (1 - Math.exp(-Math.max(0, dtMs) / CAM_POS_TAU_MS));
+    }
+
+    // Vertical: aim slightly below Chris while he falls so the ground is
+    // already framed when he arrives.
+    const aimY = Math.max(s.y + Math.min(0, s.vy) * CAM_FALL_LOOKAHEAD_S, 0);
+    const chrisWorldY = GROUND_Y - aimY * PX_PER_METER;
     // Only ever pans UP (camY <= 0): the ground never rises above its resting
     // position, and Chris is prioritised once he climbs past CHRIS_TOP_Y.
     const target = Math.min(0, chrisWorldY - CHRIS_TOP_Y);
@@ -591,9 +632,9 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
   // ── Drawing ───────────────────────────────────────────────────────────────
 
-  /** World metres -> design-space screen x. `cameraX` lands on the anchor. */
-  const worldToScreenX = (s: EngineState, worldXm: number): number =>
-    (worldXm - s.cameraX) * PX_PER_METER + camAnchorX;
+  /** World metres -> design-space screen x. The smoothed camera lands on the anchor. */
+  const worldToScreenX = (_s: EngineState, worldXm: number): number =>
+    (worldXm - camX) * PX_PER_METER + camAnchorX;
 
   /** 1 at surge start → 0 after BOOST_FX_MS; 0 when no recent pickup. */
   const boostFxT = (s: EngineState): number => {
@@ -633,7 +674,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     if (streakLevel <= 0.04) return;
 
     const level = streakLevel;
-    const camPx = s.cameraX * PX_PER_METER;
+    const camPx = camX * PX_PER_METER;
     const len = 120 + 260 * level;
     const sprite = boost > 0.15 ? streakSpriteBoost : streakSprite;
     ctx.save();
@@ -658,6 +699,11 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     ctx.restore();
   };
 
+  // Smoothed tilt — the velocity-derived target flips sign in one frame at a
+  // bounce contact; the sprite eases through it instead of snapping.
+  let tiltCur = 0;
+  let tiltLastMs = 0;
+
   const drawChris = (s: EngineState, boost: number) => {
     const key = s.chris.key;
     const anchor = CHRIS_ANCHORS[key] ?? CHRIS_ANCHORS.idle;
@@ -672,12 +718,16 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     // overlay takes over instead of vanishing mid-air.
     if (key === "death") frame = Math.min(frame, sheet.meta.frameCount - 2);
 
-    let tilt = 0;
+    let tiltTarget = 0;
     if (s.phase === "flying" || s.phase === "dying" || s.phase === "launching") {
       // Canvas y grows downward, so a climbing Chris needs a NEGATIVE rotation
       // for his nose to point up.
-      tilt = clamp(-Math.atan2(s.vy, Math.max(0.001, s.vx)), -MAX_FLIGHT_TILT_RAD, MAX_FLIGHT_TILT_RAD);
+      tiltTarget = clamp(-Math.atan2(s.vy, Math.max(0.001, s.vx)), -MAX_FLIGHT_TILT_RAD, MAX_FLIGHT_TILT_RAD);
     }
+    const tiltDt = clamp(s.timeMs - tiltLastMs, 0, 100);
+    tiltLastMs = s.timeMs;
+    tiltCur += (tiltTarget - tiltCur) * (1 - Math.exp(-tiltDt / TILT_TAU_MS));
+    const tilt = s.phase === "ready" || s.phase === "charging" ? (tiltCur = 0) : tiltCur;
 
     const x = worldToScreenX(s, s.x);
     const y = GROUND_Y - s.y * PX_PER_METER - camY;
@@ -740,7 +790,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     //              playing the profile walk that faces their travel direction
     //   6–7 (20%)  idle facing the road (front)
     //   8–9 (20%)  dancing (the viz sheet — the one bespoke action asset)
-    const leftM = s.cameraX - camAnchorX / PX_PER_METER;
+    const leftM = camX - camAnchorX / PX_PER_METER;
     const rightM = leftM + designW / PX_PER_METER;
     const k0 = Math.max(1, Math.floor(leftM / BYSTANDER_SPACING_M) - 1);
     const k1 = Math.ceil(rightM / BYSTANDER_SPACING_M) + 1;
@@ -958,7 +1008,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     paintSky(ctx, sky, -camY, designW, DESIGN_H);
 
-    const cameraPx = s.cameraX * PX_PER_METER - camAnchorX;
+    const cameraPx = camX * PX_PER_METER - camAnchorX;
     drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY, designW, DESIGN_H);
     drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY, designW, DESIGN_H);
     drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY, designW, DESIGN_H);
