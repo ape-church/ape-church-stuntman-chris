@@ -70,8 +70,8 @@ const CAM_ANCHOR_FRAC = 0.3;
 const MIN_DESIGN_W = 720;
 const MAX_DESIGN_W = 2600;
 
-/** Camera pans up once Chris climbs above this screen y. */
-const CHRIS_TOP_Y = DESIGN_H * 0.28;
+/** Camera pans up once Chris climbs above this fraction of the view height. */
+const CHRIS_TOP_FRAC = 0.28;
 const CAM_SMOOTH_TAU_MS = 150;
 /**
  * Horizontal camera smoothing. The engine's cameraX tracks Chris exactly, but
@@ -91,6 +91,24 @@ const TILT_TAU_MS = 90;
  *  fall so a steep drop doesn't leave him pinned at the bottom of the frame
  *  while the camera catches up. */
 const CAM_FALL_LOOKAHEAD_S = 0.15;
+
+/**
+ * Dynamic zoom: the camera pulls back as Chris climbs (and a little as he
+ * speeds up), so altitude reads as altitude instead of the world scrolling
+ * past a fixed frame. Zooming widens the visible design-space window — the
+ * road stays glued to its band near the bottom (the foreground art's bottom
+ * edge keeps meeting the canvas bottom) and all the extra view goes to the
+ * sky above, so no out-of-art gap is ever exposed.
+ */
+const ZOOM_MIN = 0.68;
+const ZOOM_TAU_MS = 350;
+/** m — altitude at which the altitude term reaches full zoom-out. */
+const ZOOM_ALT_FULL_M = 110;
+const ZOOM_ALT_WEIGHT = 0.32;
+/** m/s band over which the speed term fades in, and its weight. */
+const ZOOM_SPD_MIN = 60;
+const ZOOM_SPD_MAX = 180;
+const ZOOM_SPD_WEIGHT = 0.1;
 
 const PARALLAX_BG = 0.1;
 const PARALLAX_MID = 0.35;
@@ -604,7 +622,38 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   let camVx = 0;
   let lastNow = 0;
 
+  // Zoom + the view-space window it derives (see ZOOM_MIN). All draw code
+  // works in view units: `viewW × viewH` visible design px with the road at
+  // `groundY`; the frame transform maps that onto the canvas.
+  let zoom = 1;
+  let viewW = designW;
+  let viewH = DESIGN_H;
+  let groundY = GROUND_Y;
+
+  const updateZoom = (s: EngineState, dtMs: number) => {
+    const inRun =
+      s.phase === "launching" ||
+      s.phase === "flying" ||
+      s.phase === "dying" ||
+      s.phase === "landing";
+    if (!inRun) {
+      zoom = 1;
+    } else {
+      const altFrac = clamp(s.y / ZOOM_ALT_FULL_M, 0, 1);
+      const spdFrac = clamp((s.vx - ZOOM_SPD_MIN) / (ZOOM_SPD_MAX - ZOOM_SPD_MIN), 0, 1);
+      const target = clamp(1 - ZOOM_ALT_WEIGHT * altFrac - ZOOM_SPD_WEIGHT * spdFrac, ZOOM_MIN, 1);
+      zoom += (target - zoom) * (1 - Math.exp(-Math.max(0, dtMs) / ZOOM_TAU_MS));
+    }
+    viewW = designW / zoom;
+    viewH = DESIGN_H / zoom;
+    // Road pinned relative to the BOTTOM of the view: the foreground tile
+    // (DESIGN_H tall, road-aligned) then ends exactly at the canvas bottom.
+    groundY = viewH - (DESIGN_H - GROUND_Y);
+    camAnchorX = viewW * CAM_ANCHOR_FRAC;
+  };
+
   const updateCamera = (s: EngineState, dtMs: number) => {
+    updateZoom(s, dtMs);
     // Horizontal: up to and including the ride the engine does its own easing,
     // so the camera pins to it exactly; from the ramp onward it chases with a
     // smoothed velocity + position pull (see CAM_VX_TAU_MS).
@@ -626,10 +675,10 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     // Vertical: aim slightly below Chris while he falls so the ground is
     // already framed when he arrives.
     const aimY = Math.max(s.y + Math.min(0, s.vy) * CAM_FALL_LOOKAHEAD_S, 0);
-    const chrisWorldY = GROUND_Y - aimY * PX_PER_METER;
+    const chrisWorldY = groundY - aimY * PX_PER_METER;
     // Only ever pans UP (camY <= 0): the ground never rises above its resting
-    // position, and Chris is prioritised once he climbs past CHRIS_TOP_Y.
-    const target = Math.min(0, chrisWorldY - CHRIS_TOP_Y);
+    // position, and Chris is prioritised once he climbs past the top band.
+    const target = Math.min(0, chrisWorldY - viewH * CHRIS_TOP_FRAC);
     if (s.phase === "title" || s.phase === "ready") {
       camY = target;
       return;
@@ -705,9 +754,9 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     for (let i = 0; i < STREAK_COUNT; i++) {
       const h = hash32(i + 991);
       const lane = (h % 1000) / 1000;
-      const y = 40 + lane * (DESIGN_H - 280) - camY * 0.25;
+      const y = 40 + lane * (viewH - 280) - camY * 0.25;
       const speedMul = 1.15 + ((h >>> 10) % 40) / 100;
-      const wrapW = designW + len * 2;
+      const wrapW = viewW + len * 2;
       let x = (((h >>> 4) % wrapW) - camPx * speedMul) % wrapW;
       if (x < 0) x += wrapW;
       x -= len;
@@ -750,7 +799,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const tilt = s.phase === "ready" || s.phase === "charging" ? (tiltCur = 0) : tiltCur;
 
     const x = worldToScreenX(s, s.x);
-    const y = GROUND_Y - s.y * PX_PER_METER - camY;
+    const y = groundY - s.y * PX_PER_METER - camY;
 
     // Squash & stretch about the anchor: crushed during the bounce hit-stop,
     // a stretch overshoot on departure, back to 1 by the end of the window.
@@ -807,14 +856,14 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
    * objects — those stand full-size in the near lane on a pulsing pad.
    */
   const drawCrowd = (s: EngineState) => {
-    const laneY = GROUND_Y - BYSTANDER_LANE_RAISE - camY;
+    const laneY = groundY - BYSTANDER_LANE_RAISE - camY;
 
     // Start-line spectators watching the launch from behind Chris; the first
     // slot is the animated viz dancer, the rest are static meebits.
     const viz = sheets.viz;
     for (let i = 0; i < SPECTATOR_XS.length; i++) {
       const x = worldToScreenX(s, SPECTATOR_XS[i]);
-      if (x < -300 || x > designW + 300) continue;
+      if (x < -300 || x > viewW + 300) continue;
       if (i === 0 && viz) {
         drawSheet(ctx, viz, SPECTATOR_VIZ_ANCHOR, x, laneY, frameIndexAt(viz.meta, s.timeMs));
         continue;
@@ -843,7 +892,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     //   6–7 (20%)  idle facing the road (front)
     //   8–9 (20%)  dancing (the viz sheet — the one bespoke action asset)
     const leftM = camX - camAnchorX / PX_PER_METER;
-    const rightM = leftM + designW / PX_PER_METER;
+    const rightM = leftM + viewW / PX_PER_METER;
     const k0 = Math.max(1, Math.floor(leftM / BYSTANDER_SPACING_M) - 1);
     const k1 = Math.ceil(rightM / BYSTANDER_SPACING_M) + 1;
     for (let k = k0; k <= k1; k++) {
@@ -871,7 +920,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       }
       if (Math.abs(xm - TUNING.rampX) < 80) continue; // keep the ramp art clear
       const sx = worldToScreenX(s, xm);
-      if (sx < -300 || sx > designW + 300) continue;
+      if (sx < -300 || sx > viewW + 300) continue;
 
       if (bucket >= 8) {
         // Dancer — the animated viz meebit at background scale, desynced.
@@ -898,8 +947,8 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
   const drawObject = (s: EngineState, obj: WorldObjectState) => {
     const x = worldToScreenX(s, obj.x);
-    if (x < -designW * CULL_SCREENS || x > designW * (1 + CULL_SCREENS)) return;
-    const groundY = GROUND_Y - camY;
+    if (x < -viewW * CULL_SCREENS || x > viewW * (1 + CULL_SCREENS)) return;
+    const gy = groundY - camY;
 
     switch (obj.kind) {
       case "skeleton": {
@@ -910,7 +959,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         // once from triggeredAtMs and clamps on its last frame.
         const elapsed = obj.triggeredAtMs === null ? 0 : s.timeMs - obj.triggeredAtMs;
         const skelFrame = frameIndexAt(sheet.meta, elapsed);
-        drawSheet(ctx, sheet, SKELETON_ANCHOR, x, groundY, skelFrame);
+        drawSheet(ctx, sheet, SKELETON_ANCHOR, x, gy, skelFrame);
         // Both throws ship the bone as a separate sequence on the SAME 1920×1080
         // source canvas, so the identical anchor composites it exactly as
         // authored — but the bone sheet only covers a window of the clip, so it
@@ -919,7 +968,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         if (bone && obj.triggeredAtMs !== null) {
           const boneFrame = skelFrame - (BONE_FRAME_OFFSET[obj.variant] ?? 0);
           if (boneFrame >= 0 && boneFrame < bone.meta.frameCount) {
-            drawSheet(ctx, bone, SKELETON_ANCHOR, x, groundY, boneFrame);
+            drawSheet(ctx, bone, SKELETON_ANCHOR, x, gy, boneFrame);
           }
         }
         return;
@@ -931,7 +980,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
           const t = (s.timeMs - obj.triggeredAtMs) / 220;
           if (t >= 0 && t < 1) pop = 1 + 0.12 * Math.sin(t * Math.PI);
         }
-        drawBouncePad(ctx, x, groundY, s.timeMs + obj.id * 271);
+        drawBouncePad(ctx, x, gy, s.timeMs + obj.id * 271);
         // Variant 1 is the animated viz dancer; variant 2 a static meebit
         // (picked per object id, so the character is stable). Either falls
         // back to the other if its art is missing.
@@ -939,7 +988,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         const vizSheet = sheets[BOUNCE_SHEET];
         if ((obj.variant === 2 && meebitImg) || !vizSheet) {
           if (!meebitImg) return;
-          drawMeebit(ctx, meebitImg, x, groundY, MEEBIT_H, s.timeMs, obj.id, pop);
+          drawMeebit(ctx, meebitImg, x, gy, MEEBIT_H, s.timeMs, obj.id, pop);
           return;
         }
         drawSheet(
@@ -947,7 +996,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
           vizSheet,
           BOUNCE_ANCHOR,
           x,
-          groundY,
+          gy,
           frameIndexAt(vizSheet.meta, s.timeMs + obj.id * 137),
           opts(false, 0, 1, pop),
         );
@@ -956,7 +1005,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       case "blocker": {
         const sheet = sheets[BLOCKER_SHEET];
         if (!sheet) return;
-        drawSheet(ctx, sheet, BLOCKER_ANCHOR, x, groundY, frameIndexAt(sheet.meta, s.timeMs));
+        drawSheet(ctx, sheet, BLOCKER_ANCHOR, x, gy, frameIndexAt(sheet.meta, s.timeMs));
         return;
       }
       case "moonboots": {
@@ -965,7 +1014,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         if (!sheet) return;
         const bob = Math.sin(s.timeMs / 380 + obj.id) * 12;
         const altM = obj.y ?? MOONBOOTS_ALT_M;
-        const y = GROUND_Y - altM * PX_PER_METER - camY + bob;
+        const y = groundY - altM * PX_PER_METER - camY + bob;
         drawSheet(ctx, sheet, MOONBOOTS_ANCHOR, x, y, frameIndexAt(sheet.meta, s.timeMs));
         return;
       }
@@ -981,7 +1030,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
           obj.triggeredAtMs === null
             ? Math.floor(((s.timeMs + obj.id * 313) / 1000) * sheet.meta.fps) % ROBOT_IDLE_FRAMES
             : frameIndexAt(sheet.meta, s.timeMs - obj.triggeredAtMs);
-        drawSheet(ctx, sheet, ROBOT_ANCHOR, x, groundY, frame);
+        drawSheet(ctx, sheet, ROBOT_ANCHOR, x, gy, frame);
         return;
       }
       default:
@@ -1011,15 +1060,15 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       if (elapsed < 0 || elapsed > LASER_FLASH_MS) continue;
 
       const rx = worldToScreenX(s, obj.x);
-      if (rx < -designW * CULL_SCREENS || rx > designW * (1 + CULL_SCREENS)) continue;
+      if (rx < -viewW * CULL_SCREENS || rx > viewW * (1 + CULL_SCREENS)) continue;
       // Beam origin: the robot's opened visor (falls back to off-screen
       // bottom if the sheet failed to load — the pillar still reads).
       const ox = robotMeta
         ? rx + (ROBOT_EYE_AX - ROBOT_ANCHOR.ax) * robotMeta.srcCanvasW * ROBOT_ANCHOR.scale
         : rx;
       const oy = robotMeta
-        ? GROUND_Y - camY - (ROBOT_ANCHOR.ay - ROBOT_EYE_AY) * robotMeta.srcCanvasH * ROBOT_ANCHOR.scale
-        : DESIGN_H + 80;
+        ? groundY - camY - (ROBOT_ANCHOR.ay - ROBOT_EYE_AY) * robotMeta.srcCanvasH * ROBOT_ANCHOR.scale
+        : viewH + 80;
 
       // The beam is a vertical skyward PILLAR, matching the fire pose (the
       // head tips fully back; an angled bolt from that pose reads wrong —
@@ -1038,17 +1087,17 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     if (!sheet) return;
     const peak = Math.min(POWER_METER_PEAK_FRAME, sheet.meta.frameCount - 1);
     const frame = Math.round(clamp(s.powerFrac, 0, 1) * peak);
-    drawSheet(ctx, sheet, POWER_METER_ANCHOR, designW / 2, POWER_METER_Y, frame);
+    drawSheet(ctx, sheet, POWER_METER_ANCHOR, viewW / 2, POWER_METER_Y, frame);
   };
 
   const draw = (s: EngineState) => {
     // Clear the whole backing store (including any 1px letterbox rounding)
-    // in device space, then return to the design-space transform.
-    ctx.save();
+    // in device space, then set this frame's zoomed view transform.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
+    const vz = viewScale * zoom;
+    ctx.setTransform(vz, 0, 0, vz, viewOffsetX, viewOffsetY);
 
     // Screen shake: moonboots surge, bounce contacts and the touchdown all
     // judder the scene; the strongest active source wins.
@@ -1068,12 +1117,15 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       );
     }
 
-    paintSky(ctx, sky, -camY, designW, DESIGN_H);
+    // Layers are DESIGN_H tall and road-aligned; shifting them down by the
+    // zoom's extra view height keeps their bottom edge on the canvas bottom.
+    const layerShift = viewH - DESIGN_H;
+    paintSky(ctx, sky, layerShift - camY, viewW, viewH);
 
     const cameraPx = camX * PX_PER_METER - camAnchorX;
-    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY, designW, DESIGN_H);
-    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY, designW, DESIGN_H);
-    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY, designW, DESIGN_H);
+    drawParallaxLayer(ctx, bgLayers, cameraPx, PARALLAX_BG, camY - layerShift, viewW, DESIGN_H);
+    drawParallaxLayer(ctx, midLayers, cameraPx, PARALLAX_MID, camY - layerShift, viewW, DESIGN_H);
+    drawParallaxLayer(ctx, fgLayers, cameraPx, PARALLAX_FG, camY - layerShift, viewW, DESIGN_H);
 
     drawCrowd(s);
 
@@ -1082,8 +1134,8 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const rampSheet = sheets.rampUfo;
     if (rampSheet) {
       const rx = worldToScreenX(s, TUNING.rampX);
-      if (rx > -designW * CULL_SCREENS && rx < designW * (1 + CULL_SCREENS)) {
-        drawSheet(ctx, rampSheet, RAMP_ANCHOR, rx, GROUND_Y - camY, frameIndexAt(rampSheet.meta, s.timeMs));
+      if (rx > -viewW * CULL_SCREENS && rx < viewW * (1 + CULL_SCREENS)) {
+        drawSheet(ctx, rampSheet, RAMP_ANCHOR, rx, groundY - camY, frameIndexAt(rampSheet.meta, s.timeMs));
       }
     }
 
@@ -1092,7 +1144,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     drawSpeedStreaks(s, boost);
     drawChris(s, boost);
 
-    drawLasers(s, worldToScreenX(s, s.x), GROUND_Y - s.y * PX_PER_METER - camY);
+    drawLasers(s, worldToScreenX(s, s.x), groundY - s.y * PX_PER_METER - camY);
     drawPowerMeter(s);
     ctx.restore();
   };
