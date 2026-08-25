@@ -372,6 +372,30 @@ const BOUNCE_BURST_MS = 320;
 const BOUNCE_BURST_R = 150;
 /** The hit character rocks back on their heels and settles. */
 const BOUNCE_WOBBLE_MS = 620;
+
+/** Run-up wheelie: nose-up tilt (rad) at full acceleration, pivoting about
+ *  the rear wheel (design px behind the bike anchor). */
+const WHEELIE_MAX_RAD = 0.3;
+const WHEELIE_PIVOT_BACK = 80;
+const WHEELIE_TAU_MS = 140;
+/** Dust/spark kick as the wheels leave the ramp lip. */
+const LIP_BURST_MS = 320;
+const LIP_BURST_COLOR = "#ffc37a";
+/** Death: the body tumbles forward while airborne (rad/s from vx), then
+ *  eases flat on the ground; the ground impact throws a dust puff. */
+const TUMBLE_RATE_MIN = 3;
+const TUMBLE_RATE_MAX = 8;
+const TUMBLE_SETTLE_TAU_MS = 90;
+const THUD_BURST_MS = 360;
+const THUD_BURST_COLOR = "#b9a7d6";
+const THUD_SHAKE_MS = 240;
+/** Landing skid: tire mark + speed-scaled dust plume; the camera tightens
+ *  on the stopped bike before the result card. */
+const SKID_MARK_H = 9;
+const SKID_MARK_ALPHA = 0.65;
+const DUST_MAX_VX = 220;
+const ZOOM_STOPPED = 1.12;
+const ZOOM_STOPPED_TAU_MS = 320;
 /** Touchdown FX at the start of the landing skid. */
 const LAND_FX_MS = 260;
 
@@ -680,6 +704,16 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   let zoomPunch = 0;
   let prevPhase = engine.state.phase;
   let bouncePunched = false;
+  /** Engine ms of one-shot moments the renderer keys FX to. */
+  let lipMs = -Infinity;
+  let thudMs = -Infinity;
+  /** World x where the landing skid began (tire mark start); null = none. */
+  let skidStartX: number | null = null;
+  let prevY = 0;
+  let prevVx = 0;
+  let rideAccel = 0;
+  let wheelie = 0;
+  let tumble = 0;
 
   const updateZoom = (s: EngineState, dtMs: number) => {
     const dt = Math.max(0, dtMs);
@@ -691,9 +725,43 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     // One-shot punches on phase edges and bounce contacts.
     if (s.phase !== prevPhase) {
-      if (s.phase === "flying" && prevPhase === "launching") zoomPunch = ZOOM_PUNCH_LAUNCH;
-      else if (s.phase === "landing") zoomPunch = ZOOM_PUNCH_LAND;
+      if (s.phase === "flying" && prevPhase === "launching") {
+        zoomPunch = ZOOM_PUNCH_LAUNCH;
+        lipMs = s.timeMs;
+      } else if (s.phase === "landing") {
+        zoomPunch = ZOOM_PUNCH_LAND;
+        skidStartX = s.x;
+      } else if (s.phase === "ready" || s.phase === "riding") {
+        skidStartX = null;
+        lipMs = -Infinity;
+        thudMs = -Infinity;
+        tumble = 0;
+      }
       prevPhase = s.phase;
+    }
+    // Dead body hits the road.
+    if (s.phase === "dying" && s.y <= 0.001 && prevY > 0.001) thudMs = s.timeMs;
+    prevY = s.y;
+
+    // Run-up: smoothed acceleration estimate drives the wheelie.
+    if (dt > 0) {
+      const a = ((s.vx - prevVx) * 1000) / dt;
+      rideAccel += (a - rideAccel) * (1 - Math.exp(-dt / 120));
+    }
+    prevVx = s.vx;
+    const wheelieTarget =
+      s.phase === "riding" ? -WHEELIE_MAX_RAD * clamp(rideAccel / TUNING.ride.accel, 0, 1) : 0;
+    wheelie += (wheelieTarget - wheelie) * (1 - Math.exp(-dt / WHEELIE_TAU_MS));
+
+    // Death tumble: spin while airborne, settle flat once down.
+    if (s.phase === "dying") {
+      if (s.y > 0.001) {
+        const rate = clamp(s.vx / 40, TUMBLE_RATE_MIN, TUMBLE_RATE_MAX);
+        tumble += (rate * dt) / 1000;
+      } else {
+        const rest = Math.round(tumble / (2 * Math.PI)) * 2 * Math.PI;
+        tumble += (rest - tumble) * (1 - Math.exp(-dt / TUMBLE_SETTLE_TAU_MS));
+      }
     }
     const bT = sinceBounceContact(s);
     if (bT < 40) {
@@ -712,6 +780,11 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     } else if (s.phase === "dying") {
       target = ZOOM_DEATH;
       tau = ZOOM_DEATH_TAU_MS;
+    } else if (s.phase === "ended") {
+      target = zoom; // hold whatever the ending settled on under the result card
+    } else if (s.phase === "landing" && s.vx < 2) {
+      target = ZOOM_STOPPED;
+      tau = ZOOM_STOPPED_TAU_MS;
     } else if (inRun) {
       const altFrac = clamp(s.y / ZOOM_ALT_FULL_M, 0, 1);
       const spdFrac = clamp((s.vx - ZOOM_SPD_MIN) / (ZOOM_SPD_MAX - ZOOM_SPD_MIN), 0, 1);
@@ -909,16 +982,26 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         sqY = 1 - 0.12 * k;
       }
     }
-    // Backflip off the head, about the body's centre, as the crush releases.
+    // Spin about the body's centre: a backflip off a head as the crush
+    // releases, or the death tumble.
     let flip = 0;
     if (bT >= BOUNCE_SQUASH_MS && bT < BOUNCE_SQUASH_MS + BOUNCE_FLIP_MS && s.phase === "flying") {
       const p = (bT - BOUNCE_SQUASH_MS) / BOUNCE_FLIP_MS;
       flip = -2 * Math.PI * (p * p * (3 - 2 * p));
+    } else if (s.phase === "dying" || (s.phase === "ended" && s.endCause !== "landed")) {
+      flip = tumble;
     }
+    // Run-up wheelie pivots about the rear wheel.
+    const lift = s.phase === "riding" && Math.abs(wheelie) > 0.005 ? wheelie : 0;
 
-    const squashed = sqX !== 1 || sqY !== 1 || flip !== 0;
+    const squashed = sqX !== 1 || sqY !== 1 || flip !== 0 || lift !== 0;
     if (squashed) {
       ctx.save();
+      if (lift !== 0) {
+        ctx.translate(x - WHEELIE_PIVOT_BACK, y);
+        ctx.rotate(lift);
+        ctx.translate(-(x - WHEELIE_PIVOT_BACK), -y);
+      }
       if (flip !== 0) {
         ctx.translate(x, y - CHRIS_FLIP_PIVOT_UP);
         ctx.rotate(flip);
@@ -943,7 +1026,27 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     drawSheet(ctx, sheet, anchor, x, y, frame, opts(false, tilt, 1, 1));
     if (squashed) ctx.restore();
 
-    if (s.phase === "landing") drawDust(ctx, x, y, s.timeMs);
+    if (s.phase === "landing" && s.vx > 1) drawDust(ctx, x, y, s.timeMs, clamp(s.vx / DUST_MAX_VX, 0, 1));
+  };
+
+  /** Tire mark laid down by the skid, from touchdown to the bike's current x. */
+  const drawSkidMark = (s: EngineState) => {
+    if (skidStartX === null) return;
+    const x0 = worldToScreenX(s, skidStartX);
+    const x1 = worldToScreenX(s, s.x);
+    if (x1 - x0 < 4) return;
+    const y = groundY - camY + 3;
+    ctx.save();
+    ctx.fillStyle = "#120a26";
+    ctx.globalAlpha = SKID_MARK_ALPHA;
+    ctx.fillRect(x0, y - SKID_MARK_H / 2, x1 - x0, SKID_MARK_H);
+    // Darker core that fades in along the mark (rubber builds as he brakes).
+    const grad = ctx.createLinearGradient(x0, 0, x1, 0);
+    grad.addColorStop(0, "rgba(10, 5, 20, 0)");
+    grad.addColorStop(1, "rgba(10, 5, 20, 0.9)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(x0, y - 3, x1 - x0, 6);
+    ctx.restore();
   };
 
   /**
@@ -1235,6 +1338,8 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       const lT = s.timeMs - s.chris.startedAtMs;
       if (lT < LAND_FX_MS) shakeAmp = Math.max(shakeAmp, 8 * (1 - lT / LAND_FX_MS));
     }
+    const thudT = s.timeMs - thudMs;
+    if (thudT < THUD_SHAKE_MS) shakeAmp = Math.max(shakeAmp, 9 * (1 - thudT / THUD_SHAKE_MS));
     ctx.save();
     if (shakeAmp > 0.1) {
       // Slight scale-up about the view centre so the shake's translate never
@@ -1273,8 +1378,25 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
 
     for (let i = 0; i < s.objects.length; i++) drawObject(s, s.objects[i]);
 
+    drawSkidMark(s);
     drawSpeedStreaks(s, boost);
     drawChris(s, boost);
+
+    // One-shot bursts: wheels leaving the lip, the dead body hitting the road.
+    const lipT = s.timeMs - lipMs;
+    if (lipT < LIP_BURST_MS) {
+      drawImpactBurst(
+        ctx,
+        worldToScreenX(s, TUNING.rampX + TUNING.ride.rampLengthM),
+        groundY - TUNING.ride.rampHeightM * PX_PER_METER - camY,
+        lipT / LIP_BURST_MS,
+        LIP_BURST_COLOR,
+        false,
+      );
+    }
+    if (thudT < THUD_BURST_MS) {
+      drawImpactBurst(ctx, worldToScreenX(s, s.x), groundY - camY, thudT / THUD_BURST_MS, THUD_BURST_COLOR, false);
+    }
 
     drawLasers(s, worldToScreenX(s, s.x), groundY - s.y * PX_PER_METER - camY);
     drawPowerMeter(s);
@@ -1376,18 +1498,27 @@ function drawLaserPillar(
  * Impact burst at a bounce contact: an expanding additive ring plus a fan of
  * sparks thrown up and forward. `p` runs 0→1 over BOUNCE_BURST_MS.
  */
-function drawImpactBurst(ctx: CanvasRenderingContext2D, x: number, y: number, p: number): void {
+function drawImpactBurst(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  p: number,
+  color = "#9ff5ea",
+  ring = true,
+): void {
   const fade = 1 - p;
   const ease = 1 - (1 - p) * (1 - p);
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  ctx.strokeStyle = "#9ff5ea";
-  ctx.lineWidth = 10 * fade + 2;
-  ctx.globalAlpha = 0.7 * fade;
-  ctx.beginPath();
-  ctx.ellipse(x, y, BOUNCE_BURST_R * ease, BOUNCE_BURST_R * 0.55 * ease, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = "#ffffff";
+  if (ring) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 10 * fade + 2;
+    ctx.globalAlpha = 0.7 * fade;
+    ctx.beginPath();
+    ctx.ellipse(x, y, BOUNCE_BURST_R * ease, BOUNCE_BURST_R * 0.55 * ease, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = ring ? "#ffffff" : color;
   for (let i = 0; i < 9; i++) {
     const h = hash32(i + 77);
     const ang = -Math.PI * (0.15 + ((h % 1000) / 1000) * 0.9); // fan across the upper half
@@ -1401,16 +1532,20 @@ function drawImpactBurst(ctx: CanvasRenderingContext2D, x: number, y: number, p:
   ctx.restore();
 }
 
-/** Tiny deterministic dust squares kicked up behind a landing slide. */
-function drawDust(ctx: CanvasRenderingContext2D, x: number, y: number, timeMs: number): void {
+/** Deterministic dust plume kicked up behind a landing slide; `strength`
+ *  (0..1, from speed) scales the count, throw and size. */
+function drawDust(ctx: CanvasRenderingContext2D, x: number, y: number, timeMs: number, strength: number): void {
+  const n = 6 + Math.round(12 * strength);
+  const throwPx = 140 + 220 * strength;
+  const rise = 44 + 90 * strength;
   ctx.save();
-  ctx.fillStyle = "#9aa2d4";
-  for (let i = 0; i < 6; i++) {
+  ctx.fillStyle = "#c3c8ee";
+  for (let i = 0; i < n; i++) {
     const ph = ((timeMs * 0.0042 + i * 0.37) % 1 + 1) % 1;
-    const px = x - 26 - ph * 140 - i * 7;
-    const py = y - ph * 44 - (i % 3) * 9;
-    const size = 6 + ph * 16;
-    ctx.globalAlpha = 0.42 * (1 - ph);
+    const px = x - 26 - ph * throwPx - i * 7;
+    const py = y - ph * rise - (i % 3) * 9 - (hash32(i) % 30) * strength;
+    const size = (8 + ph * 20) * (1 + 0.8 * strength);
+    ctx.globalAlpha = (0.55 + 0.25 * strength) * (1 - ph);
     ctx.fillRect(px - size / 2, py - size, size, size);
   }
   ctx.restore();
