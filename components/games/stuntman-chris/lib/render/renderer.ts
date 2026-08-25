@@ -57,6 +57,16 @@ const GROUND_Y = 962;
 
 /** Chris is pinned this fraction across the screen; `cameraX` is the world x here. */
 const CAM_ANCHOR_FRAC = 0.3;
+/**
+ * Look-ahead: in flight the anchor slides from CAM_ANCHOR_SLOW_FRAC toward
+ * CAM_ANCHOR_FAST_FRAC as vx rises, so a fast Chris sits further left and
+ * the camera shows more of the road he is about to cover.
+ */
+const CAM_ANCHOR_SLOW_FRAC = 0.34;
+const CAM_ANCHOR_FAST_FRAC = 0.2;
+const CAM_ANCHOR_SPD_MIN = 80;
+const CAM_ANCHOR_SPD_MAX = 240;
+const CAM_ANCHOR_TAU_MS = 450;
 
 /**
  * Clamps on the dynamic design width (see `applySize`). The scene always
@@ -109,6 +119,21 @@ const ZOOM_ALT_WEIGHT = 0.2;
 const ZOOM_SPD_MIN = 100;
 const ZOOM_SPD_MAX = 280;
 const ZOOM_SPD_WEIGHT = 0.06;
+/** Charging: the camera creeps in with the meter (tension), and the release
+ *  lets it go. Dying: it tightens on the body. */
+const ZOOM_CHARGE_MAX = 0.06;
+const ZOOM_CHARGE_TAU_MS = 140;
+const ZOOM_DEATH = 1.14;
+const ZOOM_DEATH_TAU_MS = 220;
+/**
+ * Zoom punches: one-shot impulses layered on the zoom target that decay
+ * over ZOOM_PUNCH_TAU_MS — in on a bounce contact and the touchdown, out at
+ * the ramp lip (the pull-back reads as acceleration).
+ */
+const ZOOM_PUNCH_BOUNCE = 0.07;
+const ZOOM_PUNCH_LAND = 0.05;
+const ZOOM_PUNCH_LAUNCH = -0.05;
+const ZOOM_PUNCH_TAU_MS = 150;
 
 const PARALLAX_BG = 0.1;
 const PARALLAX_MID = 0.35;
@@ -332,8 +357,21 @@ const BOOST_FX_MS = 1050;
 /** Bounce-contact FX window: hit-stop squash, rebound stretch, screen shake.
  *  The first BOUNCE_SQUASH_MS mirror the engine's bounceHitStopMs freeze. */
 const BOUNCE_FX_MS = 480;
-const BOUNCE_SQUASH_MS = 90;
+/** Engine ms — matches TUNING.bounce.slowMoMs so the crush plays inside the
+ *  slow-motion window and the spring-back lands as time resumes. */
+const BOUNCE_SQUASH_MS = 60;
 const BOUNCE_SHAKE_MS = 320;
+/** Chris backflips off the head: a full turn over this window, easing in
+ *  and out, starting as the crush releases. */
+const BOUNCE_FLIP_MS = 520;
+/** Design px from the flying anchor up to the sprite's visual centre — the
+ *  flip spins about the body, not the wheels. */
+const CHRIS_FLIP_PIVOT_UP = 72;
+/** Impact ring + sparks at the contact point. */
+const BOUNCE_BURST_MS = 320;
+const BOUNCE_BURST_R = 150;
+/** The hit character rocks back on their heels and settles. */
+const BOUNCE_WOBBLE_MS = 620;
 /** Touchdown FX at the start of the landing skid. */
 const LAND_FX_MS = 260;
 
@@ -638,27 +676,66 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   let viewW = designW;
   let viewH = DESIGN_H;
   let groundY = GROUND_Y;
+  let anchorFrac = CAM_ANCHOR_FRAC;
+  let zoomPunch = 0;
+  let prevPhase = engine.state.phase;
+  let bouncePunched = false;
 
   const updateZoom = (s: EngineState, dtMs: number) => {
+    const dt = Math.max(0, dtMs);
     const inRun =
       s.phase === "launching" ||
       s.phase === "flying" ||
       s.phase === "dying" ||
       s.phase === "landing";
-    if (!inRun) {
-      zoom = 1;
+
+    // One-shot punches on phase edges and bounce contacts.
+    if (s.phase !== prevPhase) {
+      if (s.phase === "flying" && prevPhase === "launching") zoomPunch = ZOOM_PUNCH_LAUNCH;
+      else if (s.phase === "landing") zoomPunch = ZOOM_PUNCH_LAND;
+      prevPhase = s.phase;
+    }
+    const bT = sinceBounceContact(s);
+    if (bT < 40) {
+      if (!bouncePunched) zoomPunch = ZOOM_PUNCH_BOUNCE;
+      bouncePunched = true;
     } else {
+      bouncePunched = false;
+    }
+    zoomPunch *= Math.exp(-dt / ZOOM_PUNCH_TAU_MS);
+
+    let target = 1;
+    let tau = ZOOM_TAU_MS;
+    if (s.phase === "charging") {
+      target = 1 + ZOOM_CHARGE_MAX * clamp(s.powerFrac, 0, 1);
+      tau = ZOOM_CHARGE_TAU_MS;
+    } else if (s.phase === "dying") {
+      target = ZOOM_DEATH;
+      tau = ZOOM_DEATH_TAU_MS;
+    } else if (inRun) {
       const altFrac = clamp(s.y / ZOOM_ALT_FULL_M, 0, 1);
       const spdFrac = clamp((s.vx - ZOOM_SPD_MIN) / (ZOOM_SPD_MAX - ZOOM_SPD_MIN), 0, 1);
-      const target = clamp(1 - ZOOM_ALT_WEIGHT * altFrac - ZOOM_SPD_WEIGHT * spdFrac, ZOOM_MIN, 1);
-      zoom += (target - zoom) * (1 - Math.exp(-Math.max(0, dtMs) / ZOOM_TAU_MS));
+      target = clamp(1 - ZOOM_ALT_WEIGHT * altFrac - ZOOM_SPD_WEIGHT * spdFrac, ZOOM_MIN, 1);
     }
+    target *= 1 + zoomPunch;
+    if (s.phase === "title" || s.phase === "ready") zoom = target;
+    else zoom += (target - zoom) * (1 - Math.exp(-dt / tau));
+
+    // Look-ahead anchor (see CAM_ANCHOR_*_FRAC).
+    const spd = clamp((s.vx - CAM_ANCHOR_SPD_MIN) / (CAM_ANCHOR_SPD_MAX - CAM_ANCHOR_SPD_MIN), 0, 1);
+    const anchorTarget =
+      inRun || s.phase === "riding"
+        ? CAM_ANCHOR_SLOW_FRAC + (CAM_ANCHOR_FAST_FRAC - CAM_ANCHOR_SLOW_FRAC) * spd
+        : CAM_ANCHOR_FRAC;
+    if (s.phase === "title" || s.phase === "ready") anchorFrac = anchorTarget;
+    else anchorFrac += (anchorTarget - anchorFrac) * (1 - Math.exp(-dt / CAM_ANCHOR_TAU_MS));
+
     viewW = designW / zoom;
     viewH = DESIGN_H / zoom;
     // Road pinned relative to the BOTTOM of the view: the foreground tile
     // (DESIGN_H tall, road-aligned) then ends exactly at the canvas bottom.
     groundY = viewH - (DESIGN_H - GROUND_Y);
-    camAnchorX = viewW * CAM_ANCHOR_FRAC;
+    camAnchorX = viewW * anchorFrac;
   };
 
   const updateCamera = (s: EngineState, dtMs: number) => {
@@ -804,7 +881,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     const tilt = s.phase === "ready" || s.phase === "charging" ? (tiltCur = 0) : tiltCur;
 
     const x = worldToScreenX(s, s.x);
-    const y = groundY - s.y * PX_PER_METER - camY;
+    let y = groundY - s.y * PX_PER_METER - camY;
 
     // Squash & stretch about the anchor: crushed during the bounce hit-stop,
     // a stretch overshoot on departure, back to 1 by the end of the window.
@@ -816,6 +893,9 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
       const p = bT / BOUNCE_SQUASH_MS;
       sqX = 1 + 0.18 * p;
       sqY = 1 - 0.26 * p;
+      // Ride the crush down: the head under him drops by the character's
+      // squash (see the bounce case in drawObject), so he sinks with it.
+      y += p * 0.34 * TUNING.world.bounceTopM * PX_PER_METER;
     } else if (bT < BOUNCE_FX_MS) {
       const p = (bT - BOUNCE_SQUASH_MS) / (BOUNCE_FX_MS - BOUNCE_SQUASH_MS);
       const k = Math.sin(Math.PI * Math.min(p * 1.35, 1)) * (1 - p * 0.55);
@@ -829,9 +909,21 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
         sqY = 1 - 0.12 * k;
       }
     }
-    const squashed = sqX !== 1 || sqY !== 1;
+    // Backflip off the head, about the body's centre, as the crush releases.
+    let flip = 0;
+    if (bT >= BOUNCE_SQUASH_MS && bT < BOUNCE_SQUASH_MS + BOUNCE_FLIP_MS && s.phase === "flying") {
+      const p = (bT - BOUNCE_SQUASH_MS) / BOUNCE_FLIP_MS;
+      flip = -2 * Math.PI * (p * p * (3 - 2 * p));
+    }
+
+    const squashed = sqX !== 1 || sqY !== 1 || flip !== 0;
     if (squashed) {
       ctx.save();
+      if (flip !== 0) {
+        ctx.translate(x, y - CHRIS_FLIP_PIVOT_UP);
+        ctx.rotate(flip);
+        ctx.translate(-x, -(y - CHRIS_FLIP_PIVOT_UP));
+      }
       ctx.translate(x, y);
       ctx.scale(sqX, sqY);
       ctx.translate(-x, -y);
@@ -997,11 +1089,19 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
             sqY = 1 + 0.2 * kk;
           }
         }
+        // Rock back on the heels (canvas-clockwise = top leans forward with
+        // Chris's travel), damped out over the wobble window.
+        let lean = 0;
+        const hitT = obj.consumed && obj.triggeredAtMs !== null ? s.timeMs - obj.triggeredAtMs : Infinity;
+        if (hitT < BOUNCE_WOBBLE_MS) {
+          lean = 0.26 * Math.sin(hitT / 52) * Math.exp(-hitT / 190);
+        }
         drawBouncePad(ctx, x, gy, s.timeMs + obj.id * 271);
-        const squashed = sqX !== 1 || sqY !== 1;
+        const squashed = sqX !== 1 || sqY !== 1 || lean !== 0;
         if (squashed) {
           ctx.save();
           ctx.translate(x, gy);
+          ctx.rotate(lean);
           ctx.scale(sqX, sqY);
           ctx.translate(-x, -gy);
         }
@@ -1023,6 +1123,9 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
           );
         }
         if (squashed) ctx.restore();
+        if (hitT < BOUNCE_BURST_MS) {
+          drawImpactBurst(ctx, x, gy - TUNING.world.bounceTopM * PX_PER_METER, hitT / BOUNCE_BURST_MS);
+        }
         return;
       }
       case "blocker": {
@@ -1110,7 +1213,7 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
     if (!sheet) return;
     const peak = Math.min(POWER_METER_PEAK_FRAME, sheet.meta.frameCount - 1);
     const frame = Math.round(clamp(s.powerFrac, 0, 1) * peak);
-    drawSheet(ctx, sheet, POWER_METER_ANCHOR, viewW / 2, POWER_METER_Y, frame);
+    drawSheet(ctx, sheet, POWER_METER_ANCHOR, viewW / 2, groundY + (POWER_METER_Y - GROUND_Y), frame);
   };
 
   const draw = (s: EngineState) => {
@@ -1185,9 +1288,11 @@ export const createRenderer: CreateRendererFn = (options: CreateRendererOpts): R
   const frame = (now: number) => {
     if (disposed) return;
     raf = requestAnimationFrame(frame);
-    const dt = lastNow === 0 ? 16.7 : Math.min(100, now - lastNow);
-    lastNow = now;
     const s = engine.tick(now);
+    // Camera and FX run on ENGINE time so impact slow-motion dilates them
+    // in step with the world instead of racing ahead of a slowed Chris.
+    const dt = lastNow === 0 ? 16.7 : clamp(s.timeMs - lastNow, 0, 100);
+    lastNow = s.timeMs;
     updateCamera(s, dt);
     draw(s);
   };
@@ -1264,6 +1369,35 @@ function drawLaserPillar(
   ctx.fillStyle = color;
   ctx.fillRect(sparkX - size, sparkY - size / 4, size * 2, size / 2);
   ctx.fillRect(sparkX - size / 4, sparkY - size, size / 2, size * 2);
+  ctx.restore();
+}
+
+/**
+ * Impact burst at a bounce contact: an expanding additive ring plus a fan of
+ * sparks thrown up and forward. `p` runs 0→1 over BOUNCE_BURST_MS.
+ */
+function drawImpactBurst(ctx: CanvasRenderingContext2D, x: number, y: number, p: number): void {
+  const fade = 1 - p;
+  const ease = 1 - (1 - p) * (1 - p);
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.strokeStyle = "#9ff5ea";
+  ctx.lineWidth = 10 * fade + 2;
+  ctx.globalAlpha = 0.7 * fade;
+  ctx.beginPath();
+  ctx.ellipse(x, y, BOUNCE_BURST_R * ease, BOUNCE_BURST_R * 0.55 * ease, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  for (let i = 0; i < 9; i++) {
+    const h = hash32(i + 77);
+    const ang = -Math.PI * (0.15 + ((h % 1000) / 1000) * 0.9); // fan across the upper half
+    const speed = 160 + ((h >>> 10) % 160);
+    const sx = x + Math.cos(ang) * speed * ease + 60 * ease; // carried forward with Chris
+    const sy = y + Math.sin(ang) * speed * ease + 220 * p * p; // and pulled back down
+    const size = 4 + ((h >>> 20) % 8) * fade;
+    ctx.globalAlpha = 0.9 * fade;
+    ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+  }
   ctx.restore();
 }
 

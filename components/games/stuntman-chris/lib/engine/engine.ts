@@ -182,6 +182,8 @@ class Engine implements StuntEngine {
   private deathVx0 = 0;
   private deathVy0 = 0;
   private deathGroundedAtMs: number | null = null;
+  /** Engine ms of the last bounce contact; drives the impact slow-mo. */
+  private lastBounceMs = -Infinity;
 
   constructor(provider: FlightPlanProvider) {
     this.provider = provider;
@@ -217,6 +219,7 @@ class Engine implements StuntEngine {
     // A tab-hidden gap must not fast-forward the run; the engine clock simply
     // loses that time (it is a presentation clock, not wall time).
     dt = Math.min(dt, TUNING.loop.maxFrameMs);
+    dt *= this.timeScale();
 
     while (dt > 1e-6) {
       const step = Math.min(dt, TUNING.loop.maxStepMs);
@@ -224,6 +227,14 @@ class Engine implements StuntEngine {
       dt -= step;
     }
     return this.s;
+  }
+
+  /** Impact slow-motion (bounce contact / lethal hit), else 1. */
+  private timeScale(): number {
+    const t = this.s.timeMs;
+    if (t - this.lastBounceMs < TUNING.bounce.slowMoMs) return TUNING.bounce.slowMoScale;
+    if (this.s.phase === "dying" && t - this.deathT0 < TUNING.death.slowMoMs) return TUNING.death.slowMoScale;
+    return 1;
   }
 
   begin(): void {
@@ -343,6 +354,7 @@ class Engine implements StuntEngine {
     this.holdMs = 0;
     this.landStoppedAtMs = null;
     this.deathGroundedAtMs = null;
+    this.lastBounceMs = -Infinity;
     this.updateCamera();
   }
 
@@ -754,6 +766,7 @@ class Engine implements StuntEngine {
       if (target.kind === "bounce") {
         const obj = target.eventId === null ? undefined : this.s.objects.find((o) => o.id === target.eventId);
         if (obj) obj.consumed = true;
+        this.lastBounceMs = endMs;
         this.targetIdx++;
         const next = this.targets[this.targetIdx];
         // Next arc starts after the hit-stop; the loop head holds the contact

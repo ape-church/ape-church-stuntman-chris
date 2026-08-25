@@ -174,6 +174,9 @@ export const TUNING = {
     popVy: 10,
     /** ms — time on the ground playing the death anim before `ended`. */
     groundMs: 1100,
+    /** Lethal-hit slow-motion, same semantics as `bounce.slowMo*`. */
+    slowMoMs: 200,
+    slowMoScale: 0.35,
     /**
      * m — for a mid-air kill (laser / bone) the last arc is aimed this far
      * PAST finalDistance so Chris is still airborne when the shot connects.
@@ -203,6 +206,15 @@ export const TUNING = {
      *  grazing arrival; a bounce that barely lifts reads as a glitch. Wins
      *  over the vx band when the two conflict. */
     minRiseM: 10,
+    /**
+     * Impact slow-motion: the engine clock runs at `slowMoScale` for the
+     * first `slowMoMs` ENGINE ms after a contact (≈ slowMoMs / slowMoScale of
+     * wall time). Sells the hit without the dead stop of a hard freeze — the
+     * squash, the character's reaction and the camera punch all play out
+     * inside the dilated window.
+     */
+    slowMoMs: 60,
+    slowMoScale: 0.35,
   },
 
   /** Scripted-event triggering. */
@@ -251,7 +263,7 @@ export const TUNING = {
      * than a hit. The renderer keys Chris's squash and the screen shake to
      * the same moment.
      */
-    bounceHitStopMs: 40,
+    bounceHitStopMs: 0,
     /** ms — duration of the moonboots surge before the arc is re-solved. */
     moonbootsBoostMs: 700,
     /** × — horizontal speed multiplier applied for the surge. 1.35 was
